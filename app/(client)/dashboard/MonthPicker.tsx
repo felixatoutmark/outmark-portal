@@ -22,10 +22,8 @@ export default function MonthPicker({ selected }: { selected: string }) {
 
   function go(m: string) {
     const p = new URLSearchParams(params?.toString());
-    if (m === monthKey()) p.delete("month");
-    else p.set("month", m);
-    const qs = p.toString();
-    router.push(`/dashboard${qs ? `?${qs}` : ""}`);
+    p.set("month", m);
+    router.push(`/dashboard?${p.toString()}`);
   }
 
   return (
