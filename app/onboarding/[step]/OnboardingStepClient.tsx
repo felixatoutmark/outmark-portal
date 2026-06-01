@@ -53,15 +53,14 @@ export default function OnboardingStepClient(p: Props) {
 
   async function next() {
     await save(true);
-    // Notify admin (fire-and-forget)
-    void fetch("/api/onboarding/notify-admin", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ step: p.stepNumber, step_id: p.stepInfo.id }),
-    }).catch(() => {});
 
     if (p.stepNumber >= p.allSteps.length) {
-      // Mark client onboarding complete
+      // Final step — mark onboarding complete and notify admin once
       await fetch("/api/onboarding/complete", { method: "POST" });
+      void fetch("/api/onboarding/notify-admin", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ step: p.stepNumber, step_id: p.stepInfo.id, completed: true }),
+      }).catch(() => {});
       router.push("/dashboard");
     } else {
       router.push(`/onboarding/${p.stepNumber + 1}`);

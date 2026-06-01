@@ -15,12 +15,13 @@ export async function POST(req: NextRequest) {
   const { data: client } = await svc.from("clients").select("business_name").eq("id", me.client_id).single();
 
   const adminEmail = process.env.NEXT_PUBLIC_ADMIN_EMAIL;
-  if (adminEmail) {
+  // Only email on full completion. Per-step emails were too noisy.
+  if (adminEmail && body.completed) {
     await sendEmail({
       to: adminEmail,
       ...adminNotificationEmail({
-        subject: `Onboarding step ${body.step} done — ${client?.business_name ?? "client"}`,
-        body: `${me.email} just completed step ${body.step} (${body.step_id}) for <strong>${client?.business_name}</strong>. View progress: ${process.env.NEXT_PUBLIC_APP_URL}/admin/clients/${me.client_id}`,
+        subject: `Onboarding complete — ${client?.business_name ?? "client"}`,
+        body: `${me.email} finished onboarding for <strong>${client?.business_name}</strong>. View: ${process.env.NEXT_PUBLIC_APP_URL}/admin/clients/${me.client_id}`,
       }),
     });
   }
