@@ -1,0 +1,86 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #FAFAF8;
+  --fg: #0A0A0A;
+  --muted: #6B6B6B;
+  --subtle: #999999;
+  --border: #E0E0E0;
+  --warm: #F6F4F0;
+  --orange: #FF4F00;
+  --orange-light: #FFA27A;
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--fg);
+}
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+::selection { background: var(--fg); color: #fff; }
+
+/* Component classes — wrapped in @layer so @apply resolves cleanly */
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center gap-1.5 text-white font-semibold tracking-tight px-5 py-2 rounded-pill;
+    font-size: 13px;
+    background: linear-gradient(to top, #FF4F00, #FFA27A);
+    box-shadow: 0 4px 20px rgba(255,79,0,0.30);
+    transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 200ms;
+  }
+  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 28px rgba(255,79,0,0.40); }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .btn-ghost {
+    @apply inline-flex items-center gap-1.5 font-medium px-4 py-2 rounded-pill border bg-transparent;
+    font-size: 13px;
+    border-color: var(--border);
+    color: var(--fg);
+    transition: background 150ms, border-color 150ms;
+  }
+  .btn-ghost:hover { background: #F8F8F8; border-color: var(--subtle); }
+
+  .input, .textarea, .select {
+    @apply w-full px-3 py-2 rounded-md border bg-white;
+    font-size: 14px;
+    border-color: var(--border);
+  }
+  .input:focus, .textarea:focus, .select:focus {
+    outline: none;
+    border-color: var(--orange);
+    box-shadow: 0 0 0 3px rgba(255,79,0,0.12);
+  }
+
+  .label-text {
+    @apply font-semibold uppercase tracking-wider;
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  .card {
+    @apply rounded-card;
+    background: #fff;
+    border: 1px solid var(--border);
+    box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+  }
+
+  .section-title {
+    font-size: clamp(24px, 3vw, 34px);
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    line-height: 1.1;
+  }
+
+  .grad-text {
+    background: linear-gradient(to top, #FF4F00 0%, #FFA27A 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+}
