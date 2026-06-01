@@ -2,56 +2,96 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase-server";
 import { requireClient } from "@/lib/auth";
 import GoalCard, { parseLocalDate } from "@/components/GoalCard";
+import MonthPicker from "./MonthPicker";
 
 export const dynamic = "force-dynamic";
 
-export default async function Dashboard() {
+function pad(n: number) { return String(n).padStart(2, "0"); }
+function monthKey(d = new Date()) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-01`; }
+function monthEnd(iso: string) {
+  const d = new Date(iso + "T00:00:00");
+  const last = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+  return `${last.getFullYear()}-${pad(last.getMonth() + 1)}-${pad(last.getDate())}`;
+}
+function shiftMonth(iso: string, delta: number) {
+  const d = new Date(iso + "T00:00:00");
+  d.setMonth(d.getMonth() + delta);
+  return monthKey(d);
+}
+function monthLabel(iso: string) {
+  return new Date(iso + "T00:00:00").toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
+
+export default async function Dashboard({ searchParams }: { searchParams: Promise<{ month?: string }> }) {
   const u = await requireClient();
   const sb = await createClient();
   const { data: client } = await sb.from("clients").select("*").eq("id", u.client_id!).single();
 
   if (!client?.onboarding_completed_at) redirect("/onboarding");
 
-  // Latest period metrics (for the Goals & Targets section)
-  const { data: latestMetrics } = await sb
+  // Resolve selected month (default = current real month)
+  const sp = await searchParams;
+  const selectedMonth = /^\d{4}-\d{2}-01$/.test(sp.month ?? "") ? sp.month! : monthKey();
+  const mStart = selectedMonth;
+  const mEnd = monthEnd(selectedMonth);
+  const prevMonth = shiftMonth(selectedMonth, -1);
+  const prevStart = prevMonth;
+  const prevEnd = monthEnd(prevMonth);
+
+  // Metrics for the selected month (any row whose period_end falls in the month)
+  const { data: curMetrics } = await sb
     .from("dashboard_metrics")
     .select("*")
     .eq("client_id", u.client_id!)
-    .order("period_end", { ascending: false })
-    .limit(2);
-  const cur = latestMetrics?.[0];
-  const prev = latestMetrics?.[1];
+    .gte("period_end", mStart).lte("period_end", mEnd)
+    .order("period_end", { ascending: false }).limit(1);
+  const cur = curMetrics?.[0];
 
-  // Pipeline (Fulfillment)
+  // Previous month's metrics for delta comparison
+  const { data: prevMetrics } = await sb
+    .from("dashboard_metrics")
+    .select("*")
+    .eq("client_id", u.client_id!)
+    .gte("period_end", prevStart).lte("period_end", prevEnd)
+    .order("period_end", { ascending: false }).limit(1);
+  const prev = prevMetrics?.[0];
+
+  // Pipeline reflects the live state regardless of month — same idea as before.
   const { data: pipeline } = await sb.from("content_items")
     .select("*").eq("client_id", u.client_id!).neq("status", "published")
     .order("created_at", { ascending: false });
 
-  // Published content counts for fulfillment summary
-  const { data: published } = await sb.from("content_items")
-    .select("type").eq("client_id", u.client_id!).eq("status", "published");
+  // Published items within the selected month (by posted_at)
+  const { data: publishedThisMonth } = await sb.from("content_items")
+    .select("type, posted_at").eq("client_id", u.client_id!).eq("status", "published")
+    .gte("posted_at", `${mStart}T00:00:00`).lte("posted_at", `${mEnd}T23:59:59`);
 
-  // Deliverables for the latest periods
+  // Deliverables for the selected month
   const { data: deliverables } = await sb.from("deliverables")
     .select("*").eq("client_id", u.client_id!)
-    .order("period_end", { ascending: false }).limit(6);
+    .gte("period_end", mStart).lte("period_end", mEnd)
+    .order("period_end", { ascending: false });
 
-  // This month's goal (if any)
-  const _now = new Date();
-  const _monthIso = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, "0")}-01`;
+  // Goal for the selected month
   const { data: monthGoal } = await sb.from("monthly_goals")
-    .select("*").eq("client_id", u.client_id!).eq("month", _monthIso).maybeSingle();
+    .select("*").eq("client_id", u.client_id!).eq("month", selectedMonth).maybeSingle();
 
-  // This month's hours delivered (resets on the 1st)
+  // Hours for the selected month
   const { data: monthHours } = await sb.from("monthly_hours")
-    .select("*").eq("client_id", u.client_id!).eq("month", _monthIso).maybeSingle();
+    .select("*").eq("client_id", u.client_id!).eq("month", selectedMonth).maybeSingle();
 
   const hasMetrics = !!cur;
   const hasPaidSpend = hasMetrics && Number(cur?.paid_spend ?? 0) > 0;
 
-  // Last updated timestamp
+  // Hours computed values
+  const hoursDelivered = Number(monthHours?.hours_delivered ?? 0);
+  const hoursTarget = Number(monthHours?.hours_target ?? 12);
+  const hoursPct = hoursTarget > 0 ? (hoursDelivered / hoursTarget) * 100 : 0;
+  const hoursOver = hoursPct > 100;
+
+  // Last updated label
   const updatedCandidates: (string | null | undefined)[] = [
-    client?.updated_at, cur?.updated_at,
+    client?.updated_at, cur?.updated_at, monthHours?.updated_at, monthGoal?.updated_at,
     ...(pipeline ?? []).map((p) => p.updated_at),
     ...(deliverables ?? []).map((d) => d.updated_at),
   ];
@@ -63,26 +103,26 @@ export default async function Dashboard() {
     ? new Date(lastUpdated).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
     : null;
 
-  // Fulfillment counts by type
+  // Published-this-month counts by type
   const publishedCounts: Record<string, number> = {};
-  for (const r of published ?? []) publishedCounts[r.type] = (publishedCounts[r.type] || 0) + 1;
+  for (const r of publishedThisMonth ?? []) publishedCounts[r.type] = (publishedCounts[r.type] || 0) + 1;
   const pipelineBuckets = (["in_production", "scheduled", "awaiting_approval"] as const).map((s) => ({
     status: s, items: (pipeline ?? []).filter((i) => i.status === s),
   }));
 
   return (
-    <div className="space-y-12">
+    <div className="space-y-10">
       <header>
         <h1 className="section-title">{client?.business_name}</h1>
         <p className="text-[--muted]">
-          {hasMetrics
-            ? `Showing ${formatDate(cur.period_start)} – ${formatDate(cur.period_end)}`
-            : "Your dashboard will populate as soon as the first batch of content goes live."}
+          Showing {monthLabel(selectedMonth)} — pick another month to compare.
           {lastUpdatedLabel && (
             <span className="block text-[12px] text-[--subtle] mt-1">Last updated by Outmark · {lastUpdatedLabel}</span>
           )}
         </p>
       </header>
+
+      <MonthPicker selected={selectedMonth} />
 
       {/* ──────────────────────────────────────────────────────────── */}
       {/* SECTION 1: GOALS & TARGETS                                   */}
@@ -90,8 +130,10 @@ export default async function Dashboard() {
       <section className="space-y-5">
         <SectionHeader title="Goals & targets" subtitle="What we're shooting for and how the numbers are tracking." />
 
-        {monthGoal && (
+        {monthGoal ? (
           <GoalCard goal={monthGoal} monthLabel={parseLocalDate(monthGoal.month).toLocaleDateString(undefined, { month: "long", year: "numeric" })} />
+        ) : (
+          <Empty body={`No goal set for ${monthLabel(selectedMonth)}.`} />
         )}
 
         {hasMetrics ? (
@@ -112,11 +154,11 @@ export default async function Dashboard() {
                 <Stat label="ROAS"        value={cur.roas != null ? `${Number(cur.roas).toFixed(1)}x` : "—"} />
               </div>
             ) : (
-              <Empty body="No paid spend this period — switch on ads to start tracking ROAS." />
+              <Empty body="No paid spend this month." />
             )}
           </>
         ) : (
-          <Empty title="No metrics yet" body="Your first monthly recap will appear here once we've gathered enough data." />
+          <Empty title="No metrics for this month" body={`Nothing logged yet for ${monthLabel(selectedMonth)}.`} />
         )}
       </section>
 
@@ -126,16 +168,16 @@ export default async function Dashboard() {
       <section className="space-y-5">
         <SectionHeader title="Fulfillment" subtitle="What's been produced, what's coming, and how the contract is tracking." />
 
-        {/* Production snapshot */}
+        {/* Production snapshot — month-scoped publish counts */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <Stat label="Reels published"        value={publishedCounts.reach_reel ?? 0} />
-          <Stat label="Conversion content"     value={publishedCounts.conversion_content ?? 0} />
-          <Stat label="Paid ads"               value={publishedCounts.paid_ad ?? 0} />
-          <Stat label="In progress"            value={pipeline?.length ?? 0} />
+          <Stat label="Reels published"    value={publishedCounts.reach_reel ?? 0} />
+          <Stat label="Conversion content" value={publishedCounts.conversion_content ?? 0} />
+          <Stat label="Paid ads"           value={publishedCounts.paid_ad ?? 0} />
+          <Stat label="In progress (now)"  value={pipeline?.length ?? 0} />
         </div>
 
-        {/* Pipeline */}
-        <SubHeader>Pipeline</SubHeader>
+        {/* Pipeline (current state, not month-scoped) */}
+        <SubHeader>Pipeline (live)</SubHeader>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           {pipelineBuckets.map(({ status, items }) => (
             <div key={status} className="card p-4">
@@ -156,36 +198,32 @@ export default async function Dashboard() {
           ))}
         </div>
 
-        {/* Monthly hours */}
-        <SubHeader>Hours this month</SubHeader>
-        {(() => {
-          const delivered = Number(monthHours?.hours_delivered ?? 0);
-          const target = Number(monthHours?.hours_target ?? 12);
-          const pct = target > 0 ? (delivered / target) * 100 : 0;
-          const over = pct > 100;
-          const monthName = _now.toLocaleDateString("en-US", { month: "long", year: "numeric" });
-          return (
-            <div className="card p-4">
-              <div className="flex items-baseline justify-between mb-2">
-                <span className="font-semibold text-[14px]">{monthName}</span>
-                <span className={`text-[13px] ${over ? "text-green-700 font-semibold" : "text-[--muted]"}`}>
-                  {delivered.toFixed(2)} / {target.toFixed(2)} hrs
-                  {over ? ` · +${(delivered - target).toFixed(2)} over` : ""}
+        {/* Hours (selected month) */}
+        <SubHeader>Hours</SubHeader>
+        <div className="card p-4 space-y-2">
+          {monthHours ? (
+            <>
+              <div className="flex items-baseline justify-between">
+                <span className="font-semibold text-[14px]">{hoursDelivered.toFixed(2)} hrs delivered</span>
+                <span className={`text-[13px] ${hoursOver ? "text-green-700 font-semibold" : "text-[--muted]"}`}>
+                  of {hoursTarget.toFixed(2)} target{hoursOver ? ` · +${(hoursDelivered - hoursTarget).toFixed(2)} over` : ""}
                 </span>
               </div>
               <div className="h-2 bg-[--border] rounded-full overflow-hidden relative">
-                <div className="h-full bg-grad" style={{ width: `${Math.min(100, pct)}%` }} />
-                {over && (
+                <div className="h-full bg-grad" style={{ width: `${Math.min(100, hoursPct)}%` }} />
+                {hoursOver && (
                   <div className="absolute top-0 left-0 h-full bg-green-500 opacity-70"
-                    style={{ width: `${Math.min(100, ((delivered - target) / target) * 100)}%` }} />
+                    style={{ width: `${Math.min(100, ((hoursDelivered - hoursTarget) / hoursTarget) * 100)}%` }} />
                 )}
               </div>
-              <div className="text-[11px] text-[--subtle] mt-2">Resets on the 1st of each month.</div>
-            </div>
-          );
-        })()}
+            </>
+          ) : (
+            <div className="text-[13px] text-[--muted]">No hours logged for {monthLabel(selectedMonth)}.</div>
+          )}
+          <div className="text-[11px] text-[--subtle]">Resets on the 1st of each month.</div>
+        </div>
 
-        {/* Monthly deliverables */}
+        {/* Monthly deliverables (selected month) */}
         <SubHeader>Monthly deliverables</SubHeader>
         {deliverables?.length ? (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -205,7 +243,7 @@ export default async function Dashboard() {
               );
             })}
           </div>
-        ) : <Empty body="Deliverables tracker appears once your first month is set up." />}
+        ) : <Empty body={`No deliverables tracked for ${monthLabel(selectedMonth)}.`} />}
 
       </section>
     </div>
@@ -234,7 +272,7 @@ function Stat({ label, value, prev }: { label: string; value: any; prev?: any })
     <div className="card p-4">
       <div className="text-[11px] uppercase tracking-wider text-[--muted] mb-1">{label}</div>
       <div className="text-2xl font-bold leading-none">{v}</div>
-      {delta && <div className={`text-[11px] mt-1 ${delta.startsWith("-") ? "text-red-700" : "text-green-700"}`}>{delta} vs prior</div>}
+      {delta && <div className={`text-[11px] mt-1 ${delta.startsWith("-") ? "text-red-700" : "text-green-700"}`}>{delta} vs prior month</div>}
     </div>
   );
 }

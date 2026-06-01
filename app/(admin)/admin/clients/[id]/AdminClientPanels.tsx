@@ -437,20 +437,34 @@ function monthLabel(iso: string) {
   return d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
 }
 
+function shiftMonth(iso: string, delta: number) {
+  const d = new Date(iso + "T00:00:00");
+  d.setMonth(d.getMonth() + delta);
+  return monthKey(d);
+}
+
 function MonthlyHours({ client, hours }: { client: any; hours: any[] }) {
   const sb = createClient();
-  const currentMonth = monthKey();
-  const current = hours.find((h) => h.month === currentMonth);
+  const [selectedMonth, setSelectedMonth] = useState<string>(monthKey());
+  const current = hours.find((h) => h.month === selectedMonth);
   const [delivered, setDelivered] = useState<string>(current ? String(current.hours_delivered) : "0");
   const [target, setTarget] = useState<string>(current ? String(current.hours_target) : "12");
   const [busy, setBusy] = useState(false);
+
+  // When month changes, refresh inputs from existing row (or defaults).
+  function switchMonth(m: string) {
+    setSelectedMonth(m);
+    const row = hours.find((h) => h.month === m);
+    setDelivered(row ? String(row.hours_delivered) : "0");
+    setTarget(row ? String(row.hours_target) : "12");
+  }
 
   async function save() {
     setBusy(true);
     try {
       const { error } = await sb.from("monthly_hours").upsert({
         client_id: client.id,
-        month: currentMonth,
+        month: selectedMonth,
         hours_delivered: Number(delivered || 0),
         hours_target: Number(target || 12),
       }, { onConflict: "client_id,month" });
@@ -466,12 +480,43 @@ function MonthlyHours({ client, hours }: { client: any; hours: any[] }) {
   const pct = tNum > 0 ? (dNum / tNum) * 100 : 0;
   const over = pct > 100;
   const max = Math.max(24, tNum * 2);
+  const isCurrentMonth = selectedMonth === monthKey();
 
   return (
     <div className="card p-5 space-y-4">
       <div className="flex items-baseline justify-between">
-        <h3 className="font-bold">Monthly hours — {monthLabel(currentMonth)}</h3>
+        <h3 className="font-bold">Monthly hours</h3>
         <span className="text-[12px] text-[--muted]">resets on the 1st</span>
+      </div>
+
+      {/* Month selector */}
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          className="btn-ghost !py-1 !text-[12px]"
+          onClick={() => switchMonth(shiftMonth(selectedMonth, -1))}
+          aria-label="Previous month"
+        >←</button>
+        <input
+          type="month"
+          className="input !py-1 !text-[13px]"
+          value={selectedMonth.slice(0, 7)}
+          onChange={(e) => e.target.value && switchMonth(`${e.target.value}-01`)}
+        />
+        <button
+          type="button"
+          className="btn-ghost !py-1 !text-[12px]"
+          onClick={() => switchMonth(shiftMonth(selectedMonth, 1))}
+          aria-label="Next month"
+        >→</button>
+        {!isCurrentMonth && (
+          <button
+            type="button"
+            className="btn-ghost !py-1 !text-[12px]"
+            onClick={() => switchMonth(monthKey())}
+          >Today</button>
+        )}
+        <span className="ml-auto text-[13px] font-semibold">{monthLabel(selectedMonth)}</span>
       </div>
 
       <div>
@@ -491,7 +536,7 @@ function MonthlyHours({ client, hours }: { client: any; hours: any[] }) {
       </div>
 
       <div>
-        <label className="label-text mb-1 block">Hours delivered this month</label>
+        <label className="label-text mb-1 block">Hours delivered</label>
         <div className="flex items-center gap-3">
           <input
             type="range"
@@ -525,29 +570,56 @@ function MonthlyHours({ client, hours }: { client: any; hours: any[] }) {
             className="input !py-1 !text-[13px] !w-24"
           />
         </div>
-        <button disabled={busy} className="btn-primary" onClick={save}>{busy ? "…" : "Save hours"}</button>
+        <button disabled={busy} className="btn-primary" onClick={save}>
+          {busy ? "…" : current ? "Update" : "Save"} {monthLabel(selectedMonth)}
+        </button>
       </div>
 
       {hours.length > 0 && (
         <div className="pt-4 border-t border-[--border]">
           <h4 className="font-semibold text-[13px] mb-2">History</h4>
-          <div className="space-y-2">
-            {hours.map((h) => {
-              const p = h.hours_target > 0 ? (h.hours_delivered / h.hours_target) * 100 : 0;
-              const o = p > 100;
-              return (
-                <div key={h.id} className="flex items-center gap-3 text-[12px]">
-                  <span className="w-28 text-[--muted]">{monthLabel(h.month)}</span>
-                  <div className="flex-1 h-1.5 bg-[--border] rounded-full overflow-hidden">
-                    <div className={`h-full ${o ? "bg-green-500" : "bg-grad"}`} style={{ width: `${Math.min(100, p)}%` }} />
-                  </div>
-                  <span className="w-28 text-right">{Number(h.hours_delivered).toFixed(2)} / {Number(h.hours_target).toFixed(2)} hrs</span>
-                </div>
-              );
-            })}
+          <div className="space-y-1">
+            {hours.map((h) => (
+              <HoursHistoryRow key={h.id} h={h} onLoad={() => switchMonth(h.month)} />
+            ))}
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function HoursHistoryRow({ h, onLoad }: { h: any; onLoad: () => void }) {
+  const sb = createClient();
+  const [busy, setBusy] = useState(false);
+  const p = h.hours_target > 0 ? (h.hours_delivered / h.hours_target) * 100 : 0;
+  const o = p > 100;
+
+  async function remove() {
+    if (!window.confirm(`Delete hours for ${monthLabel(h.month)}?`)) return;
+    setBusy(true);
+    try {
+      const { error } = await sb.from("monthly_hours").delete().eq("id", h.id);
+      if (error) throw error;
+      location.reload();
+    } catch (err: any) {
+      alert(err.message ?? "Delete failed");
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="flex items-center gap-3 text-[12px] py-1">
+      <span className="w-28 text-[--muted]">{monthLabel(h.month)}</span>
+      <div className="flex-1 h-1.5 bg-[--border] rounded-full overflow-hidden">
+        <div className={`h-full ${o ? "bg-green-500" : "bg-grad"}`} style={{ width: `${Math.min(100, p)}%` }} />
+      </div>
+      <span className="w-28 text-right">{Number(h.hours_delivered).toFixed(2)} / {Number(h.hours_target).toFixed(2)} hrs</span>
+      <button className="btn-ghost !py-0.5 !text-[10px]" onClick={onLoad}>Edit</button>
+      <button
+        disabled={busy}
+        onClick={remove}
+        className="text-[10px] px-2 py-0.5 rounded-pill border border-red-200 text-red-700 hover:bg-red-50"
+      >Delete</button>
     </div>
   );
 }
