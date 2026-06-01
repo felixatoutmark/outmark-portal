@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase-browser";
 
 const TABS = ["Overview","Metrics","Content","Goals","Deliverables","Invoices","Requests","Feedback","Settings","Activity"] as const;
@@ -8,8 +8,26 @@ const MOOD_EMOJI: Record<number, string> = { 1: "😞", 2: "🙁", 3: "😐", 4:
 const MOOD_LABEL: Record<number, string> = { 1: "Unhappy", 2: "Disappointed", 3: "Neutral", 4: "Happy", 5: "Thrilled" };
 type Tab = typeof TABS[number];
 
+function tabFromHash(): Tab {
+  if (typeof window === "undefined") return "Overview";
+  const h = decodeURIComponent(window.location.hash.replace(/^#/, ""));
+  return (TABS as readonly string[]).includes(h) ? (h as Tab) : "Overview";
+}
+
 export default function AdminClientPanels(p: any) {
-  const [tab, setTab] = useState<Tab>("Overview");
+  const [tab, setTabState] = useState<Tab>("Overview");
+  // On mount + on hashchange (back/forward) sync the tab from URL.
+  useEffect(() => {
+    setTabState(tabFromHash());
+    const onHash = () => setTabState(tabFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  function setTab(t: Tab) {
+    setTabState(t);
+    // Replace (not push) so the browser back button doesn't accumulate hash history.
+    history.replaceState(null, "", `#${t}`);
+  }
   return (
     <>
       <nav className="flex gap-1 overflow-x-auto border-b border-[--border]">
