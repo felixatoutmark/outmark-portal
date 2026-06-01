@@ -29,33 +29,35 @@ export default function MonthPicker({ selected }: { selected: string }) {
   }
 
   return (
-    <div className="card p-3 flex items-center gap-2 flex-wrap">
+    <span className="inline-flex items-center gap-1.5 align-baseline">
       <button
         type="button"
-        className="btn-ghost !py-1 !text-[12px]"
+        className="text-[--muted] hover:text-[--fg] px-1 leading-none"
         onClick={() => go(shiftMonth(selected, -1))}
         aria-label="Previous month"
-      >←</button>
-      <input
-        type="month"
-        className="input !py-1 !text-[13px]"
-        value={selected.slice(0, 7)}
-        onChange={(e) => e.target.value && go(`${e.target.value}-01`)}
-      />
+      >‹</button>
+      <label className="relative cursor-pointer underline decoration-dotted underline-offset-4 hover:text-[--fg]">
+        {monthLabel(selected)}
+        <input
+          type="month"
+          className="absolute inset-0 opacity-0 cursor-pointer"
+          value={selected.slice(0, 7)}
+          onChange={(e) => e.target.value && go(`${e.target.value}-01`)}
+        />
+      </label>
       <button
         type="button"
-        className="btn-ghost !py-1 !text-[12px]"
+        className="text-[--muted] hover:text-[--fg] px-1 leading-none"
         onClick={() => go(shiftMonth(selected, 1))}
         aria-label="Next month"
-      >→</button>
+      >›</button>
       {!isCurrent && (
         <button
           type="button"
-          className="btn-ghost !py-1 !text-[12px]"
+          className="text-[11px] text-[--muted] hover:text-[--fg] ml-1"
           onClick={() => go(monthKey())}
-        >Today</button>
+        >today</button>
       )}
-      <span className="ml-auto font-bold text-[16px]">{monthLabel(selected)}</span>
-    </div>
+    </span>
   );
 }

@@ -115,14 +115,12 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
       <header>
         <h1 className="section-title">{client?.business_name}</h1>
         <p className="text-[--muted]">
-          Showing {monthLabel(selectedMonth)} — pick another month to compare.
+          Showing <MonthPicker selected={selectedMonth} />
           {lastUpdatedLabel && (
             <span className="block text-[12px] text-[--subtle] mt-1">Last updated by Outmark · {lastUpdatedLabel}</span>
           )}
         </p>
       </header>
-
-      <MonthPicker selected={selectedMonth} />
 
       {/* ──────────────────────────────────────────────────────────── */}
       {/* SECTION 1: GOALS & TARGETS                                   */}
