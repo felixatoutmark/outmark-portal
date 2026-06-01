@@ -285,20 +285,14 @@ function Content({ client, content, prefs, progress }: any) {
       </form>
       <div className="card overflow-hidden">
         <table className="w-full text-[13px]">
-          <thead className="bg-[--warm]"><tr><Th>Type</Th><Th>Status</Th><Th>Views</Th><Th>Saves</Th><Th>Shares</Th><Th>Posted</Th><Th></Th></tr></thead>
-          <tbody>{content.map((i: any) => (
-            <tr key={i.id} className="border-t border-[--border]">
-              <Td>{i.type}</Td><Td>{i.status}</Td>
-              <Td>{i.views?.toLocaleString() ?? "—"}</Td>
-              <Td>{i.saves ?? "—"}</Td><Td>{i.shares ?? "—"}</Td>
-              <Td>{i.posted_at ? new Date(i.posted_at).toLocaleDateString() : "—"}</Td>
-              <Td><select className="select !py-1 !text-[12px]" defaultValue={i.status}
-                onChange={(e) => update(i.id, { status: e.target.value })}>
-                {["in_production","scheduled","awaiting_approval","published"].map(s =>
-                  <option key={s} value={s}>{s}</option>)}
-              </select></Td>
-            </tr>
-          ))}{!content.length && <tr><td colSpan={7} className="p-4 text-center text-[--muted]">No content yet.</td></tr>}</tbody>
+          <thead className="bg-[--warm]"><tr>
+            <Th>Type</Th><Th>Status</Th><Th>Views</Th><Th>Saves</Th><Th>Shares</Th>
+            <Th>Visits</Th><Th>Clicks</Th><Th>Posted</Th><Th>IG link</Th><Th></Th>
+          </tr></thead>
+          <tbody>
+            {content.map((i: any) => <ContentRow key={i.id} item={i} onUpdate={update} />)}
+            {!content.length && <tr><td colSpan={10} className="p-4 text-center text-[--muted]">No content yet.</td></tr>}
+          </tbody>
         </table>
       </div>
 
@@ -344,6 +338,118 @@ function Content({ client, content, prefs, progress }: any) {
         <ReadField label="Baseline metrics" value={step9.baseline} />
       </div>
     </div>
+  );
+}
+
+const CONTENT_STATUS = ["in_production", "scheduled", "awaiting_approval", "published"];
+const CONTENT_TYPES: [string, string][] = [
+  ["reach_reel", "Reach Reel"],
+  ["conversion_content", "Conversion"],
+  ["paid_ad", "Paid ad"],
+];
+
+function ContentRow({ item, onUpdate }: { item: any; onUpdate: (id: string, patch: any) => Promise<void> }) {
+  const sb = createClient();
+  const [busy, setBusy] = useState(false);
+
+  // Per-field local state so user can type without instant DB churn.
+  const [views, setViews] = useState<string>(item.views != null ? String(item.views) : "");
+  const [saves, setSaves] = useState<string>(item.saves != null ? String(item.saves) : "");
+  const [shares, setShares] = useState<string>(item.shares != null ? String(item.shares) : "");
+  const [profileVisits, setProfileVisits] = useState<string>(item.profile_visits != null ? String(item.profile_visits) : "");
+  const [linkClicks, setLinkClicks] = useState<string>(item.link_clicks != null ? String(item.link_clicks) : "");
+  const [ig, setIg] = useState<string>(item.instagram_url ?? "");
+
+  // Save a numeric field if it actually changed.
+  function saveNum(field: string, raw: string, original: number | null) {
+    const newVal = raw === "" ? null : Number(raw);
+    if (newVal === original) return;
+    if (newVal != null && Number.isNaN(newVal)) return;
+    onUpdate(item.id, { [field]: newVal });
+  }
+  function saveText(field: string, raw: string, original: string | null) {
+    const trimmed = raw.trim();
+    const newVal = trimmed === "" ? null : trimmed;
+    if (newVal === (original ?? null)) return;
+    if (newVal && !/^https?:\/\//i.test(newVal)) {
+      alert("Instagram URL must start with http(s)://");
+      return;
+    }
+    onUpdate(item.id, { [field]: newVal });
+  }
+
+  async function remove() {
+    if (!window.confirm(`Delete this ${item.type} item?`)) return;
+    setBusy(true);
+    try {
+      const { error } = await sb.from("content_items").delete().eq("id", item.id);
+      if (error) throw error;
+      location.reload();
+    } catch (err: any) {
+      alert(err.message ?? "Delete failed");
+    } finally { setBusy(false); }
+  }
+
+  const num = "input !py-1 !text-[12px] !w-20";
+  const numHandlers = (set: (v: string) => void, val: string, field: string, original: number | null) => ({
+    value: val,
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => set(e.target.value),
+    onBlur: () => saveNum(field, val, original),
+    onKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur(); },
+  });
+
+  return (
+    <tr className="border-t border-[--border] align-middle">
+      <Td>
+        <select
+          className="select !py-1 !text-[12px]"
+          defaultValue={item.type}
+          onChange={(e) => onUpdate(item.id, { type: e.target.value })}
+        >
+          {CONTENT_TYPES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+        </select>
+      </Td>
+      <Td>
+        <select
+          className="select !py-1 !text-[12px]"
+          defaultValue={item.status}
+          onChange={(e) => onUpdate(item.id, { status: e.target.value })}
+        >
+          {CONTENT_STATUS.map((s) => <option key={s} value={s}>{s}</option>)}
+        </select>
+      </Td>
+      <Td><input type="number" className={num} {...numHandlers(setViews, views, "views", item.views)} /></Td>
+      <Td><input type="number" className={num} {...numHandlers(setSaves, saves, "saves", item.saves)} /></Td>
+      <Td><input type="number" className={num} {...numHandlers(setShares, shares, "shares", item.shares)} /></Td>
+      <Td><input type="number" className={num} {...numHandlers(setProfileVisits, profileVisits, "profile_visits", item.profile_visits)} /></Td>
+      <Td><input type="number" className={num} {...numHandlers(setLinkClicks, linkClicks, "link_clicks", item.link_clicks)} /></Td>
+      <Td>
+        <input
+          type="date"
+          className="input !py-1 !text-[12px]"
+          defaultValue={item.posted_at ? String(item.posted_at).slice(0, 10) : ""}
+          onChange={(e) => onUpdate(item.id, { posted_at: e.target.value ? `${e.target.value}T12:00:00` : null })}
+        />
+      </Td>
+      <Td>
+        <input
+          type="url"
+          className="input !py-1 !text-[12px] !w-32"
+          value={ig}
+          placeholder="https://…"
+          onChange={(e) => setIg(e.target.value)}
+          onBlur={() => saveText("instagram_url", ig, item.instagram_url)}
+          onKeyDown={(e) => { if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur(); }}
+        />
+      </Td>
+      <Td className="text-right">
+        <button
+          disabled={busy}
+          onClick={remove}
+          className="text-[11px] px-2 py-1 rounded-pill border border-red-200 text-red-700 hover:bg-red-50"
+        >Delete</button>
+      </Td>
+    </tr>
   );
 }
 
