@@ -112,20 +112,111 @@ function Metrics({ client, metrics }: any) {
       <div className="card overflow-hidden">
         <table className="w-full text-[13px]">
           <thead className="bg-[--warm]"><tr>
-            <Th>Period</Th><Th>Organic</Th><Th>Paid</Th><Th>Visits</Th><Th>Clicks</Th><Th>Spend</Th><Th>ROAS</Th><Th>Followers</Th>
+            <Th>Period</Th><Th>Organic</Th><Th>Paid</Th><Th>Visits</Th><Th>Clicks</Th><Th>Spend</Th><Th>ROAS</Th><Th>Followers</Th><Th></Th>
           </tr></thead>
-          <tbody>{metrics.map((m: any) => (
-            <tr key={m.id} className="border-t border-[--border]">
-              <Td>{m.period_start} → {m.period_end}</Td>
-              <Td>{m.organic_reach?.toLocaleString() ?? "—"}</Td><Td>{m.paid_reach?.toLocaleString() ?? "—"}</Td>
-              <Td>{m.profile_visits?.toLocaleString() ?? "—"}</Td><Td>{m.website_clicks?.toLocaleString() ?? "—"}</Td>
-              <Td>{m.paid_spend != null ? `$${m.paid_spend}` : "—"}</Td><Td>{m.roas != null ? `${m.roas}x` : "—"}</Td>
-              <Td>{m.followers_gained?.toLocaleString() ?? "—"}</Td>
-            </tr>
-          ))}{!metrics.length && <tr><td colSpan={8} className="p-4 text-center text-[--muted]">No metrics yet.</td></tr>}</tbody>
+          <tbody>
+            {metrics.map((m: any) => <MetricRow key={m.id} m={m} />)}
+            {!metrics.length && <tr><td colSpan={9} className="p-4 text-center text-[--muted]">No metrics yet.</td></tr>}
+          </tbody>
         </table>
       </div>
     </div>
+  );
+}
+
+// Order matches the table header: Organic, Paid, Visits, Clicks, Spend, ROAS, Followers.
+const METRIC_FIELDS: { key: string; label: string; step?: string }[] = [
+  { key: "organic_reach",    label: "Organic reach" },
+  { key: "paid_reach",       label: "Paid reach" },
+  { key: "profile_visits",   label: "Profile visits" },
+  { key: "website_clicks",   label: "Website clicks" },
+  { key: "paid_spend",       label: "Paid spend ($)", step: "0.01" },
+  { key: "roas",             label: "ROAS (x)", step: "0.01" },
+  { key: "followers_gained", label: "Followers gained" },
+];
+
+function MetricRow({ m }: { m: any }) {
+  const sb = createClient();
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [periodStart, setPeriodStart] = useState<string>(m.period_start);
+  const [periodEnd, setPeriodEnd] = useState<string>(m.period_end);
+  const [vals, setVals] = useState<Record<string, string>>(
+    Object.fromEntries(METRIC_FIELDS.map((f) => [f.key, m[f.key] == null ? "" : String(m[f.key])])),
+  );
+
+  async function save() {
+    setBusy(true);
+    try {
+      const patch: any = { period_start: periodStart, period_end: periodEnd };
+      for (const f of METRIC_FIELDS) patch[f.key] = vals[f.key] === "" ? null : Number(vals[f.key]);
+      const { error } = await sb.from("dashboard_metrics").update(patch).eq("id", m.id);
+      if (error) throw error;
+      location.reload();
+    } catch (err: any) {
+      alert(err.message ?? "Save failed");
+    } finally { setBusy(false); }
+  }
+
+  async function remove() {
+    if (!window.confirm("Delete this metrics row?")) return;
+    setBusy(true);
+    try {
+      const { error } = await sb.from("dashboard_metrics").delete().eq("id", m.id);
+      if (error) throw error;
+      location.reload();
+    } catch (err: any) {
+      alert(err.message ?? "Delete failed");
+    } finally { setBusy(false); }
+  }
+
+  if (!editing) {
+    return (
+      <tr className="border-t border-[--border]">
+        <Td>{m.period_start} → {m.period_end}</Td>
+        <Td>{m.organic_reach?.toLocaleString("en-US") ?? "—"}</Td>
+        <Td>{m.paid_reach?.toLocaleString("en-US") ?? "—"}</Td>
+        <Td>{m.profile_visits?.toLocaleString("en-US") ?? "—"}</Td>
+        <Td>{m.website_clicks?.toLocaleString("en-US") ?? "—"}</Td>
+        <Td>{m.paid_spend != null ? `$${m.paid_spend}` : "—"}</Td>
+        <Td>{m.roas != null ? `${m.roas}x` : "—"}</Td>
+        <Td>{m.followers_gained?.toLocaleString("en-US") ?? "—"}</Td>
+        <Td className="text-right whitespace-nowrap">
+          <button className="btn-ghost !py-1 !text-[11px]" onClick={() => setEditing(true)}>Edit</button>
+          <button
+            disabled={busy}
+            onClick={remove}
+            className="ml-1 text-[11px] px-2 py-1 rounded-pill border border-red-200 text-red-700 hover:bg-red-50"
+          >Delete</button>
+        </Td>
+      </tr>
+    );
+  }
+
+  return (
+    <tr className="border-t border-[--border] bg-[--warm]/50 align-top">
+      <Td>
+        <div className="flex flex-col gap-1">
+          <input type="date" className="input !py-1 !text-[12px]" value={periodStart} onChange={(e) => setPeriodStart(e.target.value)} />
+          <input type="date" className="input !py-1 !text-[12px]" value={periodEnd} onChange={(e) => setPeriodEnd(e.target.value)} />
+        </div>
+      </Td>
+      {METRIC_FIELDS.map((f) => (
+        <Td key={f.key}>
+          <input
+            type="number"
+            step={f.step ?? "1"}
+            className="input !py-1 !text-[12px] !w-20"
+            value={vals[f.key]}
+            onChange={(e) => setVals((v) => ({ ...v, [f.key]: e.target.value }))}
+          />
+        </Td>
+      ))}
+      <Td className="text-right whitespace-nowrap">
+        <button disabled={busy} className="btn-primary !py-1 !text-[11px]" onClick={save}>{busy ? "…" : "Save"}</button>
+        <button disabled={busy} className="btn-ghost !py-1 !text-[11px] ml-1" onClick={() => setEditing(false)}>Cancel</button>
+      </Td>
+    </tr>
   );
 }
 
