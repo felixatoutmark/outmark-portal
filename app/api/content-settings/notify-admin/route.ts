@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient, createServiceClient } from "@/lib/supabase-server";
-import { sendEmail, adminNotificationEmail } from "@/lib/email";
+import { sendEmail, adminNotificationEmail, escapeHtml } from "@/lib/email";
 
 // Throttle: only email admin once per 10 minutes per client (to avoid spam during typing)
 const COOLDOWN_MS = 10 * 60 * 1000;
@@ -32,8 +32,8 @@ export async function POST() {
     await sendEmail({
       to: process.env.NEXT_PUBLIC_ADMIN_EMAIL,
       ...adminNotificationEmail({
-        subject: `${client?.business_name} updated content settings`,
-        body: `${me.email} edited content preferences or filming logistics. ${process.env.NEXT_PUBLIC_APP_URL}/admin/clients/${me.client_id}`,
+        subject: `${client?.business_name ?? "client"} updated content settings`,
+        body: `${escapeHtml(me.email)} edited content preferences or filming logistics. ${process.env.NEXT_PUBLIC_APP_URL}/admin/clients/${me.client_id}`,
       }),
     });
   }

@@ -248,6 +248,10 @@ function Content({ client, content, prefs, progress }: any) {
     e.preventDefault();
     const f = new FormData(e.currentTarget as HTMLFormElement);
     const url = String(f.get("content_upload_url") ?? "").trim() || null;
+    if (url && !/^https?:\/\//i.test(url)) {
+      alert("URL must start with http:// or https://");
+      return;
+    }
     await sb.from("clients").update({ content_upload_url: url }).eq("id", client.id);
     location.reload();
   }

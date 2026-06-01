@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient, createServiceClient } from "@/lib/supabase-server";
-import { sendEmail, adminNotificationEmail } from "@/lib/email";
+import { sendEmail, adminNotificationEmail, escapeHtml } from "@/lib/email";
 
 const MOOD_EMOJI: Record<number, string> = { 1: "😞", 2: "🙁", 3: "😐", 4: "🙂", 5: "😄" };
 
@@ -19,8 +19,8 @@ export async function POST(req: NextRequest) {
     await sendEmail({
       to: process.env.NEXT_PUBLIC_ADMIN_EMAIL,
       ...adminNotificationEmail({
-        subject: `New feedback from ${client?.business_name}`,
-        body: `${me.email} left feedback: ${moodPart}, ${notePart}.<br><br><a href="${process.env.NEXT_PUBLIC_APP_URL}/admin/clients/${me.client_id}">View client</a>`,
+        subject: `New feedback from ${client?.business_name ?? "client"}`,
+        body: `${escapeHtml(me.email)} left feedback: ${moodPart}, ${notePart}.<br><br><a href="${process.env.NEXT_PUBLIC_APP_URL}/admin/clients/${me.client_id}">View client</a>`,
       }),
     });
   }

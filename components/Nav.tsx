@@ -10,6 +10,8 @@ export default function Nav({
 }: { items: Item[]; role: "admin" | "client"; fullName?: string | null; businessName?: string | null; uploadUrl?: string | null }) {
   const pathname = usePathname();
   const supabase = createClient();
+  // Defense in depth: refuse javascript:/data:/etc. even if a bad value sneaked into the DB.
+  const safeUploadUrl = uploadUrl && /^https?:\/\//i.test(uploadUrl) ? uploadUrl : null;
   async function signOut() {
     await supabase.auth.signOut();
     window.location.href = "/login";
@@ -35,8 +37,8 @@ export default function Nav({
         </nav>
         <div className="flex items-center gap-3">
           {businessName && <span className="hidden lg:inline text-[13px] text-[--muted]">{businessName}</span>}
-          {uploadUrl && (
-            <a href={uploadUrl} target="_blank" rel="noopener noreferrer" className="btn-primary !py-1.5 !text-[12px]">
+          {safeUploadUrl && (
+            <a href={safeUploadUrl!} target="_blank" rel="noopener noreferrer" className="btn-primary !py-1.5 !text-[12px]">
               Upload content ↗
             </a>
           )}
@@ -45,8 +47,8 @@ export default function Nav({
       </div>
       <nav className="md:hidden border-t" style={{ borderColor: "var(--border)" }}>
         <div className="max-w-[1200px] mx-auto px-3 py-2 flex gap-1 overflow-x-auto items-center">
-          {uploadUrl && (
-            <a href={uploadUrl} target="_blank" rel="noopener noreferrer" className="btn-primary !py-1 !text-[11px] !px-3 whitespace-nowrap">
+          {safeUploadUrl && (
+            <a href={safeUploadUrl!} target="_blank" rel="noopener noreferrer" className="btn-primary !py-1 !text-[11px] !px-3 whitespace-nowrap">
               Upload ↗
             </a>
           )}

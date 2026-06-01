@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient, createServiceClient } from "@/lib/supabase-server";
-import { sendEmail, adminNotificationEmail } from "@/lib/email";
+import { sendEmail, adminNotificationEmail, escapeHtml } from "@/lib/email";
 
 export async function POST() {
   const sb = await createClient();
@@ -20,8 +20,8 @@ export async function POST() {
     await sendEmail({
       to: process.env.NEXT_PUBLIC_ADMIN_EMAIL,
       ...adminNotificationEmail({
-        subject: `Onboarding complete — ${client?.business_name}`,
-        body: `${client?.business_name} just finished onboarding. Status set to active.`,
+        subject: `Onboarding complete — ${client?.business_name ?? "client"}`,
+        body: `${escapeHtml(client?.business_name ?? "A client")} just finished onboarding. Status set to active.`,
       }),
     });
   }
