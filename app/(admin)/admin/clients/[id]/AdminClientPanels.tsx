@@ -238,7 +238,7 @@ function MetricRow({ m }: { m: any }) {
   );
 }
 
-function Content({ client, content, prefs, progress }: any) {
+function Content({ client, prefs, progress }: any) {
   // Pull onboarding blobs for content-related steps. Content prefs (5),
   // talent (6), and approval workflow (8) all feed creative direction.
   const stepData = (n: number) => (progress ?? []).find((r: any) => r.step_number === n)?.data ?? {};
@@ -247,21 +247,6 @@ function Content({ client, content, prefs, progress }: any) {
   const step8 = stepData(8);
   const step9 = stepData(9);
   const sb = createClient();
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    const f = new FormData(e.currentTarget as HTMLFormElement);
-    const obj: any = Object.fromEntries(f.entries());
-    for (const k of ["views","saves","shares","profile_visits","link_clicks"])
-      obj[k] = obj[k] === "" ? null : Number(obj[k]);
-    if (!obj.posted_at) delete obj.posted_at;
-    obj.client_id = client.id;
-    await sb.from("content_items").insert(obj);
-    location.reload();
-  }
-  async function update(id: string, patch: any) {
-    await sb.from("content_items").update(patch).eq("id", id);
-    location.reload();
-  }
   async function saveUploadUrl(e: React.FormEvent) {
     e.preventDefault();
     const f = new FormData(e.currentTarget as HTMLFormElement);
@@ -284,35 +269,6 @@ function Content({ client, content, prefs, progress }: any) {
         <Inp name="content_upload_url" label="URL" defaultValue={client.content_upload_url ?? ""} />
         <button className="btn-primary">Save upload link</button>
       </form>
-
-      <form onSubmit={submit} className="card p-5 space-y-3">
-        <h3 className="font-bold">Add content item</h3>
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-          <Sel name="type" label="Type" options={[["reach_reel","Reach Reel"],["conversion_content","Conversion"],["paid_ad","Paid ad"]]} required />
-          <Sel name="status" label="Status" options={[["in_production","In production"],["scheduled","Scheduled"],["awaiting_approval","Awaiting approval"],["published","Published"]]} required />
-          <Inp name="instagram_url" label="Instagram URL" />
-          <Inp name="thumbnail_url" label="Thumbnail URL" />
-          <Inp name="views" label="Views" type="number" />
-          <Inp name="saves" label="Saves" type="number" />
-          <Inp name="shares" label="Shares" type="number" />
-          <Inp name="profile_visits" label="Profile visits" type="number" />
-          <Inp name="link_clicks" label="Link clicks" type="number" />
-          <Inp name="posted_at" label="Posted at" type="datetime-local" />
-        </div>
-        <button className="btn-primary">Add item</button>
-      </form>
-      <div className="card overflow-hidden">
-        <table className="w-full text-[13px]">
-          <thead className="bg-[--warm]"><tr>
-            <Th>Type</Th><Th>Status</Th><Th>Views</Th><Th>Saves</Th><Th>Shares</Th>
-            <Th>Visits</Th><Th>Clicks</Th><Th>Posted</Th><Th>IG link</Th><Th></Th>
-          </tr></thead>
-          <tbody>
-            {content.map((i: any) => <ContentRow key={i.id} item={i} onUpdate={update} />)}
-            {!content.length && <tr><td colSpan={10} className="p-4 text-center text-[--muted]">No content yet.</td></tr>}
-          </tbody>
-        </table>
-      </div>
 
       <div className="card p-5 space-y-4">
         <div>
@@ -359,117 +315,6 @@ function Content({ client, content, prefs, progress }: any) {
   );
 }
 
-const CONTENT_STATUS = ["in_production", "scheduled", "awaiting_approval", "published"];
-const CONTENT_TYPES: [string, string][] = [
-  ["reach_reel", "Reach Reel"],
-  ["conversion_content", "Conversion"],
-  ["paid_ad", "Paid ad"],
-];
-
-function ContentRow({ item, onUpdate }: { item: any; onUpdate: (id: string, patch: any) => Promise<void> }) {
-  const sb = createClient();
-  const [busy, setBusy] = useState(false);
-
-  // Per-field local state so user can type without instant DB churn.
-  const [views, setViews] = useState<string>(item.views != null ? String(item.views) : "");
-  const [saves, setSaves] = useState<string>(item.saves != null ? String(item.saves) : "");
-  const [shares, setShares] = useState<string>(item.shares != null ? String(item.shares) : "");
-  const [profileVisits, setProfileVisits] = useState<string>(item.profile_visits != null ? String(item.profile_visits) : "");
-  const [linkClicks, setLinkClicks] = useState<string>(item.link_clicks != null ? String(item.link_clicks) : "");
-  const [ig, setIg] = useState<string>(item.instagram_url ?? "");
-
-  // Save a numeric field if it actually changed.
-  function saveNum(field: string, raw: string, original: number | null) {
-    const newVal = raw === "" ? null : Number(raw);
-    if (newVal === original) return;
-    if (newVal != null && Number.isNaN(newVal)) return;
-    onUpdate(item.id, { [field]: newVal });
-  }
-  function saveText(field: string, raw: string, original: string | null) {
-    const trimmed = raw.trim();
-    const newVal = trimmed === "" ? null : trimmed;
-    if (newVal === (original ?? null)) return;
-    if (newVal && !/^https?:\/\//i.test(newVal)) {
-      alert("Instagram URL must start with http(s)://");
-      return;
-    }
-    onUpdate(item.id, { [field]: newVal });
-  }
-
-  async function remove() {
-    if (!window.confirm(`Delete this ${item.type} item?`)) return;
-    setBusy(true);
-    try {
-      const { error } = await sb.from("content_items").delete().eq("id", item.id);
-      if (error) throw error;
-      location.reload();
-    } catch (err: any) {
-      alert(err.message ?? "Delete failed");
-    } finally { setBusy(false); }
-  }
-
-  const num = "input !py-1 !text-[12px] !w-20";
-  const numHandlers = (set: (v: string) => void, val: string, field: string, original: number | null) => ({
-    value: val,
-    onChange: (e: React.ChangeEvent<HTMLInputElement>) => set(e.target.value),
-    onBlur: () => saveNum(field, val, original),
-    onKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur(); },
-  });
-
-  return (
-    <tr className="border-t border-[--border] align-middle">
-      <Td>
-        <select
-          className="select !py-1 !text-[12px]"
-          defaultValue={item.type}
-          onChange={(e) => onUpdate(item.id, { type: e.target.value })}
-        >
-          {CONTENT_TYPES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-        </select>
-      </Td>
-      <Td>
-        <select
-          className="select !py-1 !text-[12px]"
-          defaultValue={item.status}
-          onChange={(e) => onUpdate(item.id, { status: e.target.value })}
-        >
-          {CONTENT_STATUS.map((s) => <option key={s} value={s}>{s}</option>)}
-        </select>
-      </Td>
-      <Td><input type="number" className={num} {...numHandlers(setViews, views, "views", item.views)} /></Td>
-      <Td><input type="number" className={num} {...numHandlers(setSaves, saves, "saves", item.saves)} /></Td>
-      <Td><input type="number" className={num} {...numHandlers(setShares, shares, "shares", item.shares)} /></Td>
-      <Td><input type="number" className={num} {...numHandlers(setProfileVisits, profileVisits, "profile_visits", item.profile_visits)} /></Td>
-      <Td><input type="number" className={num} {...numHandlers(setLinkClicks, linkClicks, "link_clicks", item.link_clicks)} /></Td>
-      <Td>
-        <input
-          type="date"
-          className="input !py-1 !text-[12px]"
-          defaultValue={item.posted_at ? String(item.posted_at).slice(0, 10) : ""}
-          onChange={(e) => onUpdate(item.id, { posted_at: e.target.value ? `${e.target.value}T12:00:00` : null })}
-        />
-      </Td>
-      <Td>
-        <input
-          type="url"
-          className="input !py-1 !text-[12px] !w-32"
-          value={ig}
-          placeholder="https://…"
-          onChange={(e) => setIg(e.target.value)}
-          onBlur={() => saveText("instagram_url", ig, item.instagram_url)}
-          onKeyDown={(e) => { if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur(); }}
-        />
-      </Td>
-      <Td className="text-right">
-        <button
-          disabled={busy}
-          onClick={remove}
-          className="text-[11px] px-2 py-1 rounded-pill border border-red-200 text-red-700 hover:bg-red-50"
-        >Delete</button>
-      </Td>
-    </tr>
-  );
-}
 
 function Goals({ client, goals }: any) {
   const sb = createClient();

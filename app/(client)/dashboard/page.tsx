@@ -56,16 +56,6 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
     .order("period_end", { ascending: false }).limit(1);
   const prev = prevMetrics?.[0];
 
-  // Pipeline reflects the live state regardless of month — same idea as before.
-  const { data: pipeline } = await sb.from("content_items")
-    .select("*").eq("client_id", u.client_id!).neq("status", "published")
-    .order("created_at", { ascending: false });
-
-  // Published items within the selected month (by posted_at)
-  const { data: publishedThisMonth } = await sb.from("content_items")
-    .select("type, posted_at").eq("client_id", u.client_id!).eq("status", "published")
-    .gte("posted_at", `${mStart}T00:00:00`).lte("posted_at", `${mEnd}T23:59:59`);
-
   // Deliverables for the selected month
   const { data: deliverables } = await sb.from("deliverables")
     .select("*").eq("client_id", u.client_id!)
@@ -92,7 +82,6 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
   // Last updated label
   const updatedCandidates: (string | null | undefined)[] = [
     client?.updated_at, cur?.updated_at, monthHours?.updated_at, monthGoal?.updated_at,
-    ...(pipeline ?? []).map((p) => p.updated_at),
     ...(deliverables ?? []).map((d) => d.updated_at),
   ];
   const lastUpdated = updatedCandidates
@@ -103,12 +92,6 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
     ? new Date(lastUpdated).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
     : null;
 
-  // Published-this-month counts by type
-  const publishedCounts: Record<string, number> = {};
-  for (const r of publishedThisMonth ?? []) publishedCounts[r.type] = (publishedCounts[r.type] || 0) + 1;
-  const pipelineBuckets = (["in_production", "scheduled", "awaiting_approval"] as const).map((s) => ({
-    status: s, items: (pipeline ?? []).filter((i) => i.status === s),
-  }));
 
   return (
     <div className="space-y-10">
@@ -164,37 +147,7 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
       {/* SECTION 2: FULFILLMENT                                       */}
       {/* ──────────────────────────────────────────────────────────── */}
       <section className="space-y-5">
-        <SectionHeader title="Fulfillment" subtitle="What's been produced, what's coming, and how the contract is tracking." />
-
-        {/* Production snapshot — month-scoped publish counts */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <Stat label="Reels published"    value={publishedCounts.reach_reel ?? 0} />
-          <Stat label="Conversion content" value={publishedCounts.conversion_content ?? 0} />
-          <Stat label="Paid ads"           value={publishedCounts.paid_ad ?? 0} />
-          <Stat label="In progress (now)"  value={pipeline?.length ?? 0} />
-        </div>
-
-        {/* Pipeline (current state, not month-scoped) */}
-        <SubHeader>Pipeline (live)</SubHeader>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          {pipelineBuckets.map(({ status, items }) => (
-            <div key={status} className="card p-4">
-              <div className="flex items-baseline justify-between mb-2">
-                <span className="label-text">{labelForStatus(status)}</span>
-                <span className="text-[14px] font-bold">{items.length}</span>
-              </div>
-              <div className="space-y-1.5">
-                {items.slice(0, 6).map((i) => (
-                  <div key={i.id} className="text-[13px] flex items-center justify-between">
-                    <span>{labelForType(i.type)}</span>
-                    {i.posted_at && <span className="text-[--subtle] text-[11px]">{formatDate(i.posted_at)}</span>}
-                  </div>
-                ))}
-                {!items.length && <div className="text-[12px] text-[--subtle]">Nothing here.</div>}
-              </div>
-            </div>
-          ))}
-        </div>
+        <SectionHeader title="Fulfillment" subtitle="Hours delivered and contracted deliverables for the month." />
 
         {/* Hours (selected month) */}
         <SubHeader>Hours</SubHeader>
@@ -281,9 +234,6 @@ function Empty({ title, body }: { title?: string; body: string }) {
       <div className="text-[--muted] text-[14px]">{body}</div>
     </div>
   );
-}
-function labelForStatus(s: string) {
-  return ({ in_production: "In production", scheduled: "Scheduled", awaiting_approval: "Awaiting approval" } as any)[s] ?? s;
 }
 function labelForType(t: string) {
   return ({ reach_reel: "Reach Reel", conversion_content: "Conversion", paid_ad: "Paid ad" } as any)[t] ?? t;
