@@ -167,5 +167,3 @@ the structured tables as JSON, independent of how the UI renders it.
 ## What's stubbed vs. live
 
 See [STATUS.md](./STATUS.md).
-
-<!-- deploy pipeline verified from new machine on 2026-06-12 -->
