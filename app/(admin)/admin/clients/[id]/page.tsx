@@ -3,6 +3,7 @@ import { requireAdmin } from "@/lib/auth";
 import { createClient } from "@/lib/supabase-server";
 import { notFound } from "next/navigation";
 import AdminClientPanels from "./AdminClientPanels";
+import ViewAsButton from "./ViewAsButton";
 
 export const dynamic = "force-dynamic";
 
@@ -38,6 +39,7 @@ export default async function AdminClientDetail({ params }: { params: Promise<{ 
             {client.status} · {client.plan_name ?? "no plan"} · {client.primary_contact_name ?? client.billing_email}
           </p>
         </div>
+        <ViewAsButton clientId={client.id} />
       </header>
 
       <AdminClientPanels

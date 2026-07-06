@@ -1,6 +1,7 @@
 import { requireClient } from "@/lib/auth";
 import { createClient } from "@/lib/supabase-server";
 import Nav from "@/components/Nav";
+import PreviewBanner from "@/components/PreviewBanner";
 import { redirect } from "next/navigation";
 
 export default async function ClientLayout({ children }: { children: React.ReactNode }) {
@@ -14,6 +15,7 @@ export default async function ClientLayout({ children }: { children: React.React
   // (handled per-page below via OnboardingGate, but layout passes status through)
   return (
     <>
+      {u.impersonating && <PreviewBanner clientId={u.client_id!} businessName={client?.business_name} />}
       <Nav
         role="client"
         fullName={u.full_name}
