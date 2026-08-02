@@ -34,7 +34,6 @@ export async function middleware(request: NextRequest) {
     path.startsWith("/invite") ||
     path.startsWith("/auth") ||           // OAuth / magic-link callback
     path.startsWith("/api/invite/") ||    // invite-accept endpoint
-    path.startsWith("/api/admin/thumb-debug") || // TEMP: self-guarded diagnostic, remove with the route
     path.startsWith("/_next") ||
     path.startsWith("/api/public");
 
