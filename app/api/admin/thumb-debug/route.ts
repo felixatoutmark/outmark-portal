@@ -2,7 +2,7 @@
 // Vercel's egress IPs. Guarded by the tail of the service-role key (runtime
 // env — never committed). Delete this route once diagnosis is done.
 import { NextResponse, type NextRequest } from "next/server";
-import { resolveThumbnail } from "@/lib/thumbnail";
+import { resolveThumbnail, downloadImage } from "@/lib/thumbnail";
 
 export const dynamic = "force-dynamic";
 
@@ -47,5 +47,10 @@ export async function GET(req: NextRequest) {
     resolveThumbnail(url),
   ]);
 
-  return NextResponse.json({ crawler, browser, embed, resolvedThumbnail: resolved });
+  const download = resolved ? await downloadImage(resolved) : null;
+  return NextResponse.json({
+    crawler, browser, embed,
+    resolvedThumbnail: resolved ? resolved.slice(0, 120) : null,
+    downloadedImage: download ? { contentType: download.contentType, kb: Math.round(download.bytes.byteLength / 1024) } : null,
+  });
 }

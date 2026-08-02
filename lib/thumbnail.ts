@@ -35,11 +35,14 @@ function allowedUrl(raw: string): URL | null {
 
 // Fetch with a deadline that covers the BODY read too (plain fetch timeouts
 // stop at the headers), and a byte cap so a huge response can't buffer.
+// `truncate` controls overflow behavior: HTML can be cut off (the meta tags
+// we want live in <head>), but a truncated image is useless → null.
 async function fetchBytes(
   url: string,
   init: RequestInit | undefined,
   ms: number,
   maxBytes: number,
+  truncate = false,
 ): Promise<{ bytes: Uint8Array; contentType: string } | null> {
   if (!allowedUrl(url)) return null;
   const ctrl = new AbortController();
@@ -48,27 +51,30 @@ async function fetchBytes(
     const res = await fetch(url, { ...init, signal: ctrl.signal, redirect: "follow" });
     if (!res.ok || !res.body) return null;
     const len = Number(res.headers.get("content-length") ?? 0);
-    if (len > maxBytes) return null;
+    if (len > maxBytes && !truncate) return null;
     const reader = res.body.getReader();
     const chunks: Uint8Array[] = [];
     let total = 0;
+    let overflowed = false;
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       total += value.byteLength;
-      if (total > maxBytes) {
-        ctrl.abort();
-        return null;
-      }
       chunks.push(value);
+      if (total >= maxBytes) {
+        overflowed = true;
+        ctrl.abort();
+        break;
+      }
     }
+    if (overflowed && !truncate) return null;
     const bytes = new Uint8Array(total);
     let off = 0;
     for (const c of chunks) {
       bytes.set(c, off);
       off += c.byteLength;
     }
-    return { bytes, contentType: res.headers.get("content-type") ?? "" };
+    return { bytes: bytes.slice(0, maxBytes), contentType: res.headers.get("content-type") ?? "" };
   } catch {
     return null;
   } finally {
@@ -77,7 +83,7 @@ async function fetchBytes(
 }
 
 async function fetchText(url: string, init?: RequestInit, ms = 6000): Promise<string | null> {
-  const r = await fetchBytes(url, init, ms, MAX_HTML_BYTES);
+  const r = await fetchBytes(url, init, ms, MAX_HTML_BYTES, true);
   return r ? new TextDecoder("utf-8", { fatal: false }).decode(r.bytes) : null;
 }
 
@@ -119,12 +125,6 @@ export async function resolveThumbnail(rawUrl: string): Promise<string | null> {
   const yt = youtubeId(u);
   if (yt) return `https://i.ytimg.com/vi/${yt}/hqdefault.jpg`;
 
-  // Instagram: embed page first — the main site blocks datacenter IPs.
-  if (host === "instagram.com" || host.endsWith(".instagram.com")) {
-    const fromEmbed = await igEmbedImage(u);
-    if (fromEmbed) return fromEmbed;
-  }
-
   // TikTok has an unauthenticated oEmbed endpoint.
   if (host === "tiktok.com" || host.endsWith(".tiktok.com")) {
     const text = await fetchText(`https://www.tiktok.com/oembed?url=${encodeURIComponent(rawUrl)}`);
@@ -136,7 +136,10 @@ export async function resolveThumbnail(rawUrl: string): Promise<string | null> {
     }
   }
 
-  // Instagram + everything else: fetch the page and pull og:image.
+  // Everything else: fetch the page and pull og:image. Crawler UA first —
+  // Instagram (and others) only emit meta tags for crawler agents, and this
+  // works from datacenter IPs too. Browser UA as fallback for sites that
+  // block crawlers instead.
   for (const ua of [CRAWLER_UA, BROWSER_UA]) {
     const html = await fetchText(rawUrl, {
       headers: { "User-Agent": ua, Accept: "text/html,application/xhtml+xml" },
@@ -147,6 +150,12 @@ export async function resolveThumbnail(rawUrl: string): Promise<string | null> {
       html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image(?::secure_url)?["']/i) ??
       html.match(/<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i);
     if (m?.[1]?.startsWith("http")) return decodeEntities(m[1]);
+  }
+
+  // Instagram last resort: the public embed page (helps on some networks).
+  if (host === "instagram.com" || host.endsWith(".instagram.com")) {
+    const fromEmbed = await igEmbedImage(u);
+    if (fromEmbed) return fromEmbed;
   }
   return null;
 }
