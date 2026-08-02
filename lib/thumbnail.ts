@@ -95,6 +95,21 @@ function decodeEntities(s: string): string {
   return s.replace(/&amp;/g, "&").replace(/&#38;/g, "&").replace(/&quot;/g, '"').replace(/&#39;/g, "'");
 }
 
+// Instagram's embed page is served to datacenter IPs far more reliably than
+// the main site (it exists to be fetched by third parties). The post image is
+// the <img class="EmbeddedMediaImage"> tag.
+async function igEmbedImage(u: URL): Promise<string | null> {
+  const m = u.pathname.match(/^\/(?:reel|p|tv)\/([A-Za-z0-9_-]+)/);
+  if (!m) return null;
+  const html = await fetchText(`https://www.instagram.com/p/${m[1]}/embed/captioned/`, {
+    headers: { "User-Agent": BROWSER_UA, Accept: "text/html,application/xhtml+xml" },
+  });
+  if (!html) return null;
+  const tag = html.match(/<img[^>]+EmbeddedMediaImage[^>]*>/i)?.[0];
+  const src = tag?.match(/src="([^"]+)"/i)?.[1];
+  return src?.startsWith("http") ? decodeEntities(src) : null;
+}
+
 export async function resolveThumbnail(rawUrl: string): Promise<string | null> {
   const u = allowedUrl(rawUrl);
   if (!u) return null;
@@ -103,6 +118,12 @@ export async function resolveThumbnail(rawUrl: string): Promise<string | null> {
   // YouTube thumbnails are deterministic — no fetch needed.
   const yt = youtubeId(u);
   if (yt) return `https://i.ytimg.com/vi/${yt}/hqdefault.jpg`;
+
+  // Instagram: embed page first — the main site blocks datacenter IPs.
+  if (host === "instagram.com" || host.endsWith(".instagram.com")) {
+    const fromEmbed = await igEmbedImage(u);
+    if (fromEmbed) return fromEmbed;
+  }
 
   // TikTok has an unauthenticated oEmbed endpoint.
   if (host === "tiktok.com" || host.endsWith(".tiktok.com")) {

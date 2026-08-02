@@ -18,6 +18,18 @@ async function requireAdminSession() {
 const EXT_BY_TYPE: Record<string, string> = {
   "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif", "image/avif": "avif",
 };
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+
+async function uploadToBucket(
+  clientId: string, month: string, position: number, bytes: Uint8Array, contentType: string,
+): Promise<string | null> {
+  const ext = EXT_BY_TYPE[contentType.split(";")[0].trim()] ?? "jpg";
+  const path = `${clientId}/${month}-${position}-${Date.now()}.${ext}`;
+  const svc = createServiceClient();
+  const { error } = await svc.storage.from("thumbnails").upload(path, bytes, { contentType, upsert: true });
+  if (error) return null;
+  return svc.storage.from("thumbnails").getPublicUrl(path).data.publicUrl;
+}
 
 // Resolve + download + cache. Falls back to the remote URL if caching fails,
 // and to null if nothing could be resolved at all. When `directImage` is set
@@ -30,15 +42,7 @@ async function cacheThumbnail(
   if (!remote) return null;
   const img = await downloadImage(remote);
   if (!img) return remote; // better a temporary remote URL than nothing
-  const ext = EXT_BY_TYPE[img.contentType.split(";")[0].trim()] ?? "jpg";
-  const path = `${clientId}/${month}-${position}-${Date.now()}.${ext}`;
-  const svc = createServiceClient();
-  const { error } = await svc.storage.from("thumbnails").upload(path, img.bytes, {
-    contentType: img.contentType,
-    upsert: true,
-  });
-  if (error) return remote;
-  return svc.storage.from("thumbnails").getPublicUrl(path).data.publicUrl;
+  return (await uploadToBucket(clientId, month, position, img.bytes, img.contentType)) ?? remote;
 }
 
 export async function POST(req: NextRequest) {
@@ -66,9 +70,19 @@ export async function POST(req: NextRequest) {
     .eq("client_id", clientId).eq("month", month).eq("position", position)
     .maybeSingle();
 
+  // Precedence: uploaded image file > pasted image URL > keep existing > auto-resolve.
+  const thumbData = String(body.thumbnail_data ?? "");
+  const dataMatch = thumbData.match(/^data:(image\/(?:jpeg|jpg|png|webp|gif|avif));base64,(.+)$/);
   const manualThumb = String(body.thumbnail_url ?? "").trim();
   let thumbnail_url: string | null;
-  if (/^https?:\/\//i.test(manualThumb)) {
+  if (dataMatch) {
+    const bytes = new Uint8Array(Buffer.from(dataMatch[2], "base64"));
+    if (bytes.byteLength === 0 || bytes.byteLength > MAX_UPLOAD_BYTES) {
+      return NextResponse.json({ success: false, error: "Image must be under 5 MB" }, { status: 400 });
+    }
+    thumbnail_url = await uploadToBucket(clientId, month, position, bytes, dataMatch[1]);
+    if (!thumbnail_url) return NextResponse.json({ success: false, error: "Image upload failed" }, { status: 500 });
+  } else if (/^https?:\/\//i.test(manualThumb)) {
     // Cache the admin-supplied image too; fall back to hotlinking it.
     thumbnail_url = (await cacheThumbnail(clientId, month, position, manualThumb, true)) ?? manualThumb;
   } else if (existing && existing.url === url && existing.thumbnail_url) {

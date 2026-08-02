@@ -266,6 +266,19 @@ function WinningReels({ client, winning }: any) {
     const url = String(f.get("url") ?? "").trim();
     if (!monthValid) { alert("Pick a month first."); return; }
     if (!/^https?:\/\//i.test(url)) { alert("Paste the full link, starting with https://"); return; }
+    // Optional uploaded image → data URL (takes precedence over auto-fetch).
+    const file = f.get("thumbnail_file") as File | null;
+    let thumbnail_data = "";
+    if (file && file.size > 0) {
+      if (file.size > 5 * 1024 * 1024) { alert("Image must be under 5 MB."); return; }
+      if (!file.type.startsWith("image/")) { alert("That file isn't an image."); return; }
+      thumbnail_data = await new Promise<string>((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(String(r.result));
+        r.onerror = reject;
+        r.readAsDataURL(file);
+      });
+    }
     setBusy(position);
     try {
       const res = await fetch("/api/admin/winning-content", {
@@ -280,6 +293,7 @@ function WinningReels({ client, winning }: any) {
           metric_label: String(f.get("metric_label") ?? "").trim(),
           // Blank = auto-fetch. Only sent when the admin pasted an override.
           thumbnail_url: String(f.get("thumbnail_url") ?? "").trim(),
+          thumbnail_data,
         }),
       });
       const j = await res.json().catch(() => null);
@@ -288,7 +302,7 @@ function WinningReels({ client, winning }: any) {
         return;
       }
       if (j && !j.thumbnail_resolved) {
-        alert("Saved — but no thumbnail could be pulled from that link. The card will show a placeholder; try a different link format if you want an image.");
+        alert("Saved — but no thumbnail could be pulled from that link. To add one: upload an image (or paste an image URL) in the same slot and press Update.");
       }
       location.reload();
     } catch {
@@ -369,8 +383,11 @@ function WinningReels({ client, winning }: any) {
                 <Inp name="title" label="Title (optional)" defaultValue={row?.title ?? ""} placeholder="Hook that carried it" />
                 <Inp name="metric_label" label="Performance (optional)" defaultValue={row?.metric_label ?? ""} placeholder="182k views · 4.1k saves" />
               </div>
-              <Inp name="thumbnail_url" label="Custom image URL (optional — leave blank to fetch automatically)"
-                placeholder={row?.thumbnail_url ? "Auto-fetched — paste a URL here to replace it" : "https://…/screenshot.jpg"} />
+              <div className="grid grid-cols-2 gap-3">
+                <Inp name="thumbnail_url" label="Custom image URL (optional)"
+                  placeholder={row?.thumbnail_url ? "Auto-fetched — paste a URL to replace" : "https://…/screenshot.jpg"} />
+                <Inp name="thumbnail_file" label="Or upload an image (optional)" type="file" accept="image/*" />
+              </div>
               <div className="flex gap-2">
                 <button className="btn-primary text-[13px]" disabled={busy === pos || !monthValid}>
                   {busy === pos ? "Saving…" : row ? "Update" : "Save"}
