@@ -70,6 +70,11 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
   const { data: monthHours } = await sb.from("monthly_hours")
     .select("*").eq("client_id", u.client_id!).eq("month", selectedMonth).maybeSingle();
 
+  // Top 3 winning reels for the selected month
+  const { data: winning } = await sb.from("winning_content")
+    .select("*").eq("client_id", u.client_id!).eq("month", selectedMonth)
+    .order("position", { ascending: true });
+
   const hasMetrics = !!cur;
   const hasPaidSpend = hasMetrics && Number(cur?.paid_spend ?? 0) > 0;
 
@@ -83,6 +88,7 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
   const updatedCandidates: (string | null | undefined)[] = [
     client?.updated_at, cur?.updated_at, monthHours?.updated_at, monthGoal?.updated_at,
     ...(deliverables ?? []).map((d) => d.updated_at),
+    ...(winning ?? []).map((w) => w.updated_at),
   ];
   const lastUpdated = updatedCandidates
     .filter((v): v is string => !!v)
@@ -140,6 +146,44 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
           </>
         ) : (
           <Empty title="No metrics for this month" body={`Nothing logged yet for ${monthLabel(selectedMonth)}.`} />
+        )}
+      </section>
+
+      {/* ──────────────────────────────────────────────────────────── */}
+      {/* SECTION: TOP 3 WINNING REELS                                 */}
+      {/* ──────────────────────────────────────────────────────────── */}
+      <section className="space-y-5">
+        <SectionHeader title="Top 3 winning reels" subtitle={`Best-performing content for ${monthLabel(selectedMonth)} — tap a card to watch.`} />
+        {winning?.length ? (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            {winning.map((w) => (
+              <a key={w.id} href={w.url} target="_blank" rel="noopener noreferrer"
+                className="card overflow-hidden group block">
+                <div className="relative aspect-[4/5] bg-[--warm] overflow-hidden">
+                  {w.thumbnail_url ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={w.thumbnail_url} alt={w.title ?? `Winning reel #${w.position}`}
+                      referrerPolicy="no-referrer"
+                      className="absolute inset-0 w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.04]" />
+                  ) : (
+                    <div className="absolute inset-0 flex items-center justify-center text-[40px] text-[--subtle]">▶</div>
+                  )}
+                  <span className="absolute top-2 left-2 bg-grad text-white text-[12px] font-bold px-2 py-0.5 rounded-full shadow">
+                    #{w.position}
+                  </span>
+                  <span className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                    <span className="bg-black/60 text-white rounded-full w-12 h-12 flex items-center justify-center text-[18px] pl-1">▶</span>
+                  </span>
+                </div>
+                <div className="p-3">
+                  <div className="font-semibold text-[14px] leading-snug">{w.title ?? "Watch the reel"}</div>
+                  {w.metric_label && <div className="text-[12px] text-[--muted] mt-0.5">{w.metric_label}</div>}
+                </div>
+              </a>
+            ))}
+          </div>
+        ) : (
+          <Empty body={`No winning content logged for ${monthLabel(selectedMonth)}.`} />
         )}
       </section>
 

@@ -238,7 +238,154 @@ function MetricRow({ m }: { m: any }) {
   );
 }
 
-function Content({ client, prefs, progress }: any) {
+function WinningReels({ client, winning }: any) {
+  const now = new Date();
+  const defaultMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const [month, setMonthState] = useState(defaultMonth);
+  // Survive the location.reload() after save/remove (the tab itself survives
+  // via the URL hash; the picked month lives in sessionStorage).
+  useEffect(() => {
+    const saved = sessionStorage.getItem(`wr-month-${client.id}`);
+    if (saved && /^\d{4}-\d{2}$/.test(saved)) setMonthState(saved);
+  }, [client.id]);
+  function setMonth(m: string) {
+    setMonthState(m);
+    try { sessionStorage.setItem(`wr-month-${client.id}`, m); } catch {}
+  }
+  const monthValid = /^\d{4}-\d{2}$/.test(month);
+  const [busy, setBusy] = useState<number | null>(null);
+  const rows = monthValid ? (winning ?? []).filter((w: any) => String(w.month).startsWith(month)) : [];
+  const rowFor = (pos: number) => rows.find((w: any) => w.position === pos);
+  const monthsWithData: string[] = Array.from(
+    new Set((winning ?? []).map((w: any) => String(w.month).slice(0, 7))),
+  ).sort().reverse() as string[];
+
+  async function save(e: React.FormEvent, position: number) {
+    e.preventDefault();
+    const f = new FormData(e.currentTarget as HTMLFormElement);
+    const url = String(f.get("url") ?? "").trim();
+    if (!monthValid) { alert("Pick a month first."); return; }
+    if (!/^https?:\/\//i.test(url)) { alert("Paste the full link, starting with https://"); return; }
+    setBusy(position);
+    try {
+      const res = await fetch("/api/admin/winning-content", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_id: client.id,
+          month,
+          position,
+          url,
+          title: String(f.get("title") ?? "").trim(),
+          metric_label: String(f.get("metric_label") ?? "").trim(),
+        }),
+      });
+      const j = await res.json().catch(() => null);
+      if (!res.ok) {
+        alert(j?.error ?? "Save failed");
+        return;
+      }
+      if (j && !j.thumbnail_resolved) {
+        alert("Saved — but no thumbnail could be pulled from that link. The card will show a placeholder; try a different link format if you want an image.");
+      }
+      location.reload();
+    } catch {
+      alert("Save failed — network error.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function remove(id: string, pos: number) {
+    if (!confirm(`Remove winning reel #${pos} for ${month}?`)) return;
+    try {
+      const res = await fetch("/api/admin/winning-content", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => null);
+        alert(j?.error ?? "Delete failed");
+        return;
+      }
+      location.reload();
+    } catch {
+      alert("Delete failed — network error.");
+    }
+  }
+
+  return (
+    <div className="card p-5 space-y-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h3 className="font-bold">Top 3 winning reels</h3>
+          <p className="text-[12px] text-[--muted]">
+            Paste the link to the month's best performers. A thumbnail is pulled
+            automatically and shows as a clickable card on the client dashboard.
+          </p>
+        </div>
+        <div>
+          <label className="label-text mb-1 block">Month</label>
+          <input type="month" className="input" value={month} onChange={(e) => setMonth(e.target.value)} />
+        </div>
+      </div>
+
+      {monthsWithData.length > 0 && (
+        <div className="flex gap-1.5 flex-wrap items-center text-[12px] text-[--muted]">
+          <span>Months with reels:</span>
+          {monthsWithData.map((m) => (
+            <button key={m} type="button" onClick={() => setMonth(m)}
+              className={`px-2 py-0.5 rounded-full border transition-colors ${m === month
+                ? "border-[--orange] text-[--fg] font-semibold"
+                : "border-[--border] hover:border-[--subtle]"}`}>
+              {m}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {[1, 2, 3].map((pos) => {
+        const row = rowFor(pos);
+        return (
+          <form key={`${month}-${pos}-${row?.id ?? "new"}`} onSubmit={(e) => save(e, pos)}
+            className="border border-[--border] rounded-lg p-4 flex gap-4 items-start">
+            {row?.thumbnail_url ? (
+              <a href={row.url} target="_blank" rel="noopener noreferrer" className="shrink-0">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={row.thumbnail_url} alt={`#${pos} thumbnail`} referrerPolicy="no-referrer"
+                  className="w-[72px] h-[96px] object-cover rounded-md border border-[--border]" />
+              </a>
+            ) : (
+              <div className="shrink-0 w-[72px] h-[96px] rounded-md bg-[--warm] border border-[--border] flex items-center justify-center text-[--subtle] text-[20px]">
+                {row ? "▶" : `#${pos}`}
+              </div>
+            )}
+            <div className="flex-1 space-y-2">
+              <Inp name="url" label={`#${pos} link`} defaultValue={row?.url ?? ""} placeholder="https://www.instagram.com/reel/…" required />
+              <div className="grid grid-cols-2 gap-3">
+                <Inp name="title" label="Title (optional)" defaultValue={row?.title ?? ""} placeholder="Hook that carried it" />
+                <Inp name="metric_label" label="Performance (optional)" defaultValue={row?.metric_label ?? ""} placeholder="182k views · 4.1k saves" />
+              </div>
+              <div className="flex gap-2">
+                <button className="btn-primary text-[13px]" disabled={busy === pos || !monthValid}>
+                  {busy === pos ? "Saving…" : row ? "Update" : "Save"}
+                </button>
+                {row && (
+                  <button type="button" onClick={() => remove(row.id, pos)} className="btn-ghost text-[13px]">
+                    Remove
+                  </button>
+                )}
+              </div>
+            </div>
+          </form>
+        );
+      })}
+    </div>
+  );
+}
+
+function Content({ client, prefs, progress, winning }: any) {
   // Pull onboarding blobs for content-related steps. Content prefs (5),
   // talent (6), and approval workflow (8) all feed creative direction.
   const stepData = (n: number) => (progress ?? []).find((r: any) => r.step_number === n)?.data ?? {};
@@ -260,6 +407,8 @@ function Content({ client, prefs, progress }: any) {
   }
   return (
     <div className="space-y-4">
+      <WinningReels client={client} winning={winning} />
+
       <form onSubmit={saveUploadUrl} className="card p-5 space-y-3">
         <h3 className="font-bold">Content upload link</h3>
         <p className="text-[12px] text-[--muted] -mt-1">
