@@ -20,9 +20,13 @@ const EXT_BY_TYPE: Record<string, string> = {
 };
 
 // Resolve + download + cache. Falls back to the remote URL if caching fails,
-// and to null if nothing could be resolved at all.
-async function cacheThumbnail(clientId: string, month: string, position: number, sourceUrl: string): Promise<string | null> {
-  const remote = await resolveThumbnail(sourceUrl);
+// and to null if nothing could be resolved at all. When `directImage` is set
+// the URL is treated as the image itself (admin pasted it) — still cached,
+// since hotlinked IG/TikTok CDN URLs expire.
+async function cacheThumbnail(
+  clientId: string, month: string, position: number, sourceUrl: string, directImage = false,
+): Promise<string | null> {
+  const remote = directImage ? sourceUrl : await resolveThumbnail(sourceUrl);
   if (!remote) return null;
   const img = await downloadImage(remote);
   if (!img) return remote; // better a temporary remote URL than nothing
@@ -65,7 +69,8 @@ export async function POST(req: NextRequest) {
   const manualThumb = String(body.thumbnail_url ?? "").trim();
   let thumbnail_url: string | null;
   if (/^https?:\/\//i.test(manualThumb)) {
-    thumbnail_url = manualThumb;
+    // Cache the admin-supplied image too; fall back to hotlinking it.
+    thumbnail_url = (await cacheThumbnail(clientId, month, position, manualThumb, true)) ?? manualThumb;
   } else if (existing && existing.url === url && existing.thumbnail_url) {
     thumbnail_url = existing.thumbnail_url; // unchanged link → keep cached thumb
   } else {

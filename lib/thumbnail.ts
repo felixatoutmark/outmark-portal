@@ -2,6 +2,10 @@
 // YouTube / anything with og:image). Runs server-side at save time; returns
 // null when nothing could be resolved so the UI can fall back to a placeholder.
 
+// Instagram (and several other sites) only emit og: tags for crawler agents —
+// a browser UA gets the JS app shell with no metadata. Try the crawler UA
+// first, then a real browser UA for sites that block crawlers instead.
+const CRAWLER_UA = "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)";
 const BROWSER_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const MAX_HTML_BYTES = 512 * 1024;
@@ -112,13 +116,15 @@ export async function resolveThumbnail(rawUrl: string): Promise<string | null> {
   }
 
   // Instagram + everything else: fetch the page and pull og:image.
-  const html = await fetchText(rawUrl, {
-    headers: { "User-Agent": BROWSER_UA, Accept: "text/html,application/xhtml+xml" },
-  });
-  if (html) {
+  for (const ua of [CRAWLER_UA, BROWSER_UA]) {
+    const html = await fetchText(rawUrl, {
+      headers: { "User-Agent": ua, Accept: "text/html,application/xhtml+xml" },
+    });
+    if (!html) continue;
     const m =
       html.match(/<meta[^>]+property=["']og:image(?::secure_url)?["'][^>]+content=["']([^"']+)["']/i) ??
-      html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image(?::secure_url)?["']/i);
+      html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image(?::secure_url)?["']/i) ??
+      html.match(/<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i);
     if (m?.[1]?.startsWith("http")) return decodeEntities(m[1]);
   }
   return null;

@@ -278,6 +278,8 @@ function WinningReels({ client, winning }: any) {
           url,
           title: String(f.get("title") ?? "").trim(),
           metric_label: String(f.get("metric_label") ?? "").trim(),
+          // Blank = auto-fetch. Only sent when the admin pasted an override.
+          thumbnail_url: String(f.get("thumbnail_url") ?? "").trim(),
         }),
       });
       const j = await res.json().catch(() => null);
@@ -367,6 +369,8 @@ function WinningReels({ client, winning }: any) {
                 <Inp name="title" label="Title (optional)" defaultValue={row?.title ?? ""} placeholder="Hook that carried it" />
                 <Inp name="metric_label" label="Performance (optional)" defaultValue={row?.metric_label ?? ""} placeholder="182k views · 4.1k saves" />
               </div>
+              <Inp name="thumbnail_url" label="Custom image URL (optional — leave blank to fetch automatically)"
+                placeholder={row?.thumbnail_url ? "Auto-fetched — paste a URL here to replace it" : "https://…/screenshot.jpg"} />
               <div className="flex gap-2">
                 <button className="btn-primary text-[13px]" disabled={busy === pos || !monthValid}>
                   {busy === pos ? "Saving…" : row ? "Update" : "Save"}
