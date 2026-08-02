@@ -70,10 +70,12 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
   const { data: monthHours } = await sb.from("monthly_hours")
     .select("*").eq("client_id", u.client_id!).eq("month", selectedMonth).maybeSingle();
 
-  // Top 3 winning reels for the selected month
+  // Top 3 winning reels + top performing ad for the selected month
   const { data: winning } = await sb.from("winning_content")
     .select("*").eq("client_id", u.client_id!).eq("month", selectedMonth)
     .order("position", { ascending: true });
+  const { data: topAd } = await sb.from("top_ad")
+    .select("*").eq("client_id", u.client_id!).eq("month", selectedMonth).maybeSingle();
 
   const hasMetrics = !!cur;
   const hasPaidSpend = hasMetrics && Number(cur?.paid_spend ?? 0) > 0;
@@ -89,6 +91,7 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
     client?.updated_at, cur?.updated_at, monthHours?.updated_at, monthGoal?.updated_at,
     ...(deliverables ?? []).map((d) => d.updated_at),
     ...(winning ?? []).map((w) => w.updated_at),
+    topAd?.updated_at,
   ];
   const lastUpdated = updatedCandidates
     .filter((v): v is string => !!v)
@@ -153,34 +156,78 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
       {/* SECTION: TOP 3 WINNING REELS                                 */}
       {/* ──────────────────────────────────────────────────────────── */}
       <section className="space-y-5">
-        <SectionHeader title="Top 3 winning reels" subtitle={`Best-performing content for ${monthLabel(selectedMonth)} — tap a card to watch.`} />
-        {winning?.length ? (
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            {winning.map((w) => (
-              <a key={w.id} href={w.url} target="_blank" rel="noopener noreferrer"
-                className="card overflow-hidden group block">
-                <div className="relative aspect-[4/5] bg-[--warm] overflow-hidden">
-                  {w.thumbnail_url ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={w.thumbnail_url} alt={w.title ?? `Winning reel #${w.position}`}
-                      referrerPolicy="no-referrer"
-                      className="absolute inset-0 w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.04]" />
-                  ) : (
-                    <div className="absolute inset-0 flex items-center justify-center text-[40px] text-[--subtle]">▶</div>
-                  )}
-                  <span className="absolute top-2 left-2 bg-grad text-white text-[12px] font-bold px-2 py-0.5 rounded-full shadow">
-                    #{w.position}
-                  </span>
-                  <span className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                    <span className="bg-black/60 text-white rounded-full w-12 h-12 flex items-center justify-center text-[18px] pl-1">▶</span>
-                  </span>
+        <SectionHeader title="Top performing content" subtitle={`The winning reels and top ad for ${monthLabel(selectedMonth)}.`} />
+        {winning?.length || topAd ? (
+          <div className="flex flex-col lg:flex-row gap-5">
+            {/* Reels — 3-up, compact */}
+            <div className="lg:flex-[3] min-w-0 space-y-2">
+              <SubHeader>Top 3 winning reels</SubHeader>
+              {winning?.length ? (
+                <div className="grid grid-cols-3 gap-3">
+                  {winning.map((w) => (
+                    <a key={w.id} href={w.url} target="_blank" rel="noopener noreferrer"
+                      className="card overflow-hidden group block">
+                      <div className="relative aspect-[4/5] bg-[--warm] overflow-hidden">
+                        {w.thumbnail_url ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={w.thumbnail_url} alt={w.title ?? `Winning reel #${w.position}`}
+                            referrerPolicy="no-referrer"
+                            className="absolute inset-0 w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.04]" />
+                        ) : (
+                          <div className="absolute inset-0 flex items-center justify-center text-[32px] text-[--subtle]">▶</div>
+                        )}
+                        <span className="absolute top-1.5 left-1.5 bg-grad text-white text-[11px] font-bold px-1.5 py-0.5 rounded-full shadow">
+                          #{w.position}
+                        </span>
+                        <span className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                          <span className="bg-black/60 text-white rounded-full w-10 h-10 flex items-center justify-center text-[15px] pl-0.5">▶</span>
+                        </span>
+                      </div>
+                      <div className="p-2.5">
+                        <div className="font-semibold text-[13px] leading-snug truncate">{w.title ?? "Watch the reel"}</div>
+                        {w.metric_label && <div className="text-[11px] text-[--muted] mt-0.5 truncate">{w.metric_label}</div>}
+                      </div>
+                    </a>
+                  ))}
                 </div>
-                <div className="p-3">
-                  <div className="font-semibold text-[14px] leading-snug">{w.title ?? "Watch the reel"}</div>
-                  {w.metric_label && <div className="text-[12px] text-[--muted] mt-0.5">{w.metric_label}</div>}
+              ) : (
+                <div className="card p-5 text-center text-[13px] text-[--muted]">No reels logged this month.</div>
+              )}
+            </div>
+
+            {/* Divider between reels and the ad */}
+            <div className="hidden lg:block w-px self-stretch bg-[--border]" />
+            <div className="lg:hidden h-px w-full bg-[--border]" />
+
+            {/* Top performing ad — photo or video */}
+            <div className="lg:flex-1 min-w-0 space-y-2 lg:max-w-[240px]">
+              <SubHeader>Top performing ad</SubHeader>
+              {topAd ? (
+                <div className="card overflow-hidden max-w-[240px]">
+                  <div className="relative aspect-[4/5] bg-black overflow-hidden">
+                    {topAd.media_type === "video" ? (
+                      <video src={topAd.media_url} controls playsInline preload="metadata"
+                        className="absolute inset-0 w-full h-full object-cover" />
+                    ) : (
+                      <a href={topAd.media_url} target="_blank" rel="noopener noreferrer">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={topAd.media_url} alt={topAd.title ?? "Top performing ad"}
+                          className="absolute inset-0 w-full h-full object-cover" />
+                      </a>
+                    )}
+                    <span className="absolute top-1.5 left-1.5 bg-black/70 text-white text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full">
+                      Ad
+                    </span>
+                  </div>
+                  <div className="p-2.5">
+                    <div className="font-semibold text-[13px] leading-snug truncate">{topAd.title ?? "Top performing ad"}</div>
+                    {topAd.metric_label && <div className="text-[11px] text-[--muted] mt-0.5 truncate">{topAd.metric_label}</div>}
+                  </div>
                 </div>
-              </a>
-            ))}
+              ) : (
+                <div className="card p-5 text-center text-[13px] text-[--muted]">No ad highlighted this month.</div>
+              )}
+            </div>
           </div>
         ) : (
           <Empty body={`No winning content logged for ${monthLabel(selectedMonth)}.`} />

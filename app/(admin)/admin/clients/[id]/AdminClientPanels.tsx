@@ -238,7 +238,12 @@ function MetricRow({ m }: { m: any }) {
   );
 }
 
-function WinningReels({ client, winning }: any) {
+const AD_EXT_BY_TYPE: Record<string, string> = {
+  "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif", "image/avif": "avif",
+  "video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm",
+};
+
+function WinningReels({ client, winning, topAds }: any) {
   const now = new Date();
   const defaultMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
   const [month, setMonthState] = useState(defaultMonth);
@@ -254,11 +259,20 @@ function WinningReels({ client, winning }: any) {
   }
   const monthValid = /^\d{4}-\d{2}$/.test(month);
   const [busy, setBusy] = useState<number | null>(null);
+  const [adBusy, setAdBusy] = useState(false);
+  const sb = createClient();
   const rows = monthValid ? (winning ?? []).filter((w: any) => String(w.month).startsWith(month)) : [];
   const rowFor = (pos: number) => rows.find((w: any) => w.position === pos);
+  const adRow = monthValid ? (topAds ?? []).find((a: any) => String(a.month).startsWith(month)) : undefined;
   const monthsWithData: string[] = Array.from(
-    new Set((winning ?? []).map((w: any) => String(w.month).slice(0, 7))),
+    new Set([...(winning ?? []), ...(topAds ?? [])].map((w: any) => String(w.month).slice(0, 7))),
   ).sort().reverse() as string[];
+
+  function storagePathFromUrl(url: string): string | null {
+    const marker = "/storage/v1/object/public/thumbnails/";
+    const i = url.indexOf(marker);
+    return i === -1 ? null : decodeURIComponent(url.slice(i + marker.length));
+  }
 
   async function save(e: React.FormEvent, position: number) {
     e.preventDefault();
@@ -312,6 +326,71 @@ function WinningReels({ client, winning }: any) {
     }
   }
 
+  // Top-performing-ad upload goes browser → storage directly: Vercel API
+  // routes cap request bodies at ~4.5 MB, far too small for ad videos.
+  async function saveAd(e: React.FormEvent) {
+    e.preventDefault();
+    const f = new FormData(e.currentTarget as HTMLFormElement);
+    if (!monthValid) { alert("Pick a month first."); return; }
+    const file = f.get("ad_file") as File | null;
+    const title = String(f.get("ad_title") ?? "").trim() || null;
+    const metric_label = String(f.get("ad_metric") ?? "").trim() || null;
+    const hasNewFile = !!(file && file.size > 0);
+    if (!hasNewFile && !adRow) { alert("Choose a photo or video first."); return; }
+    setAdBusy(true);
+    try {
+      let media_url = adRow?.media_url;
+      let media_type = adRow?.media_type;
+      if (hasNewFile) {
+        media_type = file!.type.startsWith("video/") ? "video" : file!.type.startsWith("image/") ? "image" : null;
+        if (!media_type) { alert("That file isn't a photo or video."); return; }
+        if (/heic|heif/i.test(file!.type)) {
+          alert("iPhone HEIC photos don't display in most browsers — please export it as JPG or PNG first.");
+          return;
+        }
+        if (file!.size > 50 * 1024 * 1024) { alert("Keep it under 50 MB (Supabase file limit)."); return; }
+        const ext = AD_EXT_BY_TYPE[file!.type] ?? (file!.name.split(".").pop() ?? "bin").toLowerCase().replace(/[^a-z0-9]/g, "");
+        const path = `${client.id}/ad-${month}-${Date.now()}.${ext}`;
+        const { error: upErr } = await sb.storage.from("thumbnails").upload(path, file!, {
+          contentType: file!.type, upsert: true,
+        });
+        if (upErr) {
+          const hint = /row-level security|policy/i.test(upErr.message)
+            ? " (Has the 0013 migration been run in the Supabase SQL editor?)" : "";
+          alert(`Upload failed: ${upErr.message}${hint}`);
+          return;
+        }
+        media_url = sb.storage.from("thumbnails").getPublicUrl(path).data.publicUrl;
+      }
+      const { error } = await sb.from("top_ad").upsert(
+        { client_id: client.id, month: `${month}-01`, media_url, media_type, title, metric_label },
+        { onConflict: "client_id,month" },
+      );
+      if (error) { alert(`Save failed: ${error.message}`); return; }
+      // Best-effort cleanup of the replaced file so old creative doesn't stay
+      // publicly reachable in the bucket forever.
+      if (hasNewFile && adRow?.media_url && adRow.media_url !== media_url) {
+        const old = storagePathFromUrl(adRow.media_url);
+        if (old) await sb.storage.from("thumbnails").remove([old]).then(() => {}, () => {});
+      }
+      location.reload();
+    } catch (err: any) {
+      alert(`Save failed: ${err?.message ?? "network error"}`);
+    } finally {
+      setAdBusy(false);
+    }
+  }
+
+  async function removeAd() {
+    if (!adRow || !confirm(`Remove the top performing ad for ${month}?`)) return;
+    const { error } = await sb.from("top_ad").delete().eq("id", adRow.id);
+    if (error) { alert(`Delete failed: ${error.message}`); return; }
+    // Best-effort: also delete the media file so it stops being reachable.
+    const old = storagePathFromUrl(adRow.media_url ?? "");
+    if (old) await sb.storage.from("thumbnails").remove([old]).then(() => {}, () => {});
+    location.reload();
+  }
+
   async function remove(id: string, pos: number) {
     if (!confirm(`Remove winning reel #${pos} for ${month}?`)) return;
     try {
@@ -335,10 +414,11 @@ function WinningReels({ client, winning }: any) {
     <div className="card p-5 space-y-4">
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div>
-          <h3 className="font-bold">Top 3 winning reels</h3>
+          <h3 className="font-bold">Top performing content</h3>
           <p className="text-[12px] text-[--muted]">
-            Paste the link to the month's best performers. A thumbnail is pulled
-            automatically and shows as a clickable card on the client dashboard.
+            The month's best performers, shown as one row on the client dashboard:
+            three reels (paste links — thumbnails are pulled automatically) plus one
+            top ad (upload a photo or video).
           </p>
         </div>
         <div>
@@ -349,7 +429,7 @@ function WinningReels({ client, winning }: any) {
 
       {monthsWithData.length > 0 && (
         <div className="flex gap-1.5 flex-wrap items-center text-[12px] text-[--muted]">
-          <span>Months with reels:</span>
+          <span>Months with content:</span>
           {monthsWithData.map((m) => (
             <button key={m} type="button" onClick={() => setMonth(m)}
               className={`px-2 py-0.5 rounded-full border transition-colors ${m === month
@@ -389,11 +469,11 @@ function WinningReels({ client, winning }: any) {
                 <Inp name="thumbnail_file" label="Or upload an image (optional)" type="file" accept="image/*" />
               </div>
               <div className="flex gap-2">
-                <button className="btn-primary text-[13px]" disabled={busy === pos || !monthValid}>
+                <button className="btn-primary text-[13px]" disabled={busy === pos || !monthValid || adBusy}>
                   {busy === pos ? "Saving…" : row ? "Update" : "Save"}
                 </button>
                 {row && (
-                  <button type="button" onClick={() => remove(row.id, pos)} className="btn-ghost text-[13px]">
+                  <button type="button" onClick={() => remove(row.id, pos)} className="btn-ghost text-[13px]" disabled={adBusy}>
                     Remove
                   </button>
                 )}
@@ -402,11 +482,49 @@ function WinningReels({ client, winning }: any) {
           </form>
         );
       })}
+
+      <div className="border-t border-[--border] pt-4 space-y-3">
+        <div>
+          <h4 className="font-bold text-[14px]">Top performing ad</h4>
+          <p className="text-[12px] text-[--muted]">
+            Upload a photo or video of the month's best ad. Shows next to the reels on the
+            client dashboard. One per month; uploading again replaces it.
+          </p>
+        </div>
+        <form key={`ad-${month}-${adRow?.id ?? "new"}`} onSubmit={saveAd} className="border border-[--border] rounded-lg p-4 flex gap-4 items-start">
+          {adRow ? (
+            adRow.media_type === "video" ? (
+              <video src={adRow.media_url} className="shrink-0 w-[72px] h-[96px] object-cover rounded-md border border-[--border] bg-black" muted playsInline preload="metadata" />
+            ) : (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={adRow.media_url} alt="Top ad" className="shrink-0 w-[72px] h-[96px] object-cover rounded-md border border-[--border]" />
+            )
+          ) : (
+            <div className="shrink-0 w-[72px] h-[96px] rounded-md bg-[--warm] border border-[--border] flex items-center justify-center text-[--subtle] text-[18px]">AD</div>
+          )}
+          <div className="flex-1 space-y-2">
+            <Inp name="ad_file" type="file" accept="image/*,video/mp4,video/quicktime,video/webm"
+              label={adRow ? "Replace photo / video (optional)" : "Photo or video (max 50 MB)"} />
+            <div className="grid grid-cols-2 gap-3">
+              <Inp name="ad_title" label="Title (optional)" defaultValue={adRow?.title ?? ""} placeholder="Spring promo ad" />
+              <Inp name="ad_metric" label="Performance (optional)" defaultValue={adRow?.metric_label ?? ""} placeholder="3.2x ROAS · $1.2k spend" />
+            </div>
+            <div className="flex gap-2">
+              <button className="btn-primary text-[13px]" disabled={adBusy || !monthValid || busy !== null}>
+                {adBusy ? "Uploading… (keep this page open)" : adRow ? "Update ad" : "Save ad"}
+              </button>
+              {adRow && (
+                <button type="button" onClick={removeAd} className="btn-ghost text-[13px]" disabled={adBusy}>Remove</button>
+              )}
+            </div>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
 
-function Content({ client, prefs, progress, winning }: any) {
+function Content({ client, prefs, progress, winning, topAds }: any) {
   // Pull onboarding blobs for content-related steps. Content prefs (5),
   // talent (6), and approval workflow (8) all feed creative direction.
   const stepData = (n: number) => (progress ?? []).find((r: any) => r.step_number === n)?.data ?? {};
@@ -428,7 +546,7 @@ function Content({ client, prefs, progress, winning }: any) {
   }
   return (
     <div className="space-y-4">
-      <WinningReels client={client} winning={winning} />
+      <WinningReels client={client} winning={winning} topAds={topAds} />
 
       <form onSubmit={saveUploadUrl} className="card p-5 space-y-3">
         <h3 className="font-bold">Content upload link</h3>
