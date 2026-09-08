@@ -109,7 +109,9 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
         <p className="text-[--muted]">
           Showing <MonthPicker selected={selectedMonth} />
           {lastUpdatedLabel && (
-            <span className="block text-[12px] text-[--subtle] mt-1">Last updated by Outmark · {lastUpdatedLabel}</span>
+            <span className="block text-[12px] text-[--subtle] mt-1">
+              {cur?.source === "meta" ? "Auto-synced from Meta" : "Last updated by Outmark"} · {lastUpdatedLabel}
+            </span>
           )}
         </p>
       </header>

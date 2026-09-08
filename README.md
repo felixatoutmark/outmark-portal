@@ -121,6 +121,36 @@ In Supabase **Authentication → URL Configuration**, add:
 - Site URL: `https://portal.outmark.ca`
 - Redirect URLs: `https://portal.outmark.ca/auth/callback`
 
+### Meta sync (Instagram insights + ads → dashboard)
+
+A daily cron pulls each connected client's Instagram account insights
+(organic reach, net followers gained), the month's top 3 reels and paid-ad
+numbers (reach, spend, ROAS) into `dashboard_metrics` / `winning_content`.
+Profile visits and website clicks stay manual — Meta removed those metrics
+from the API in January 2025. Uses a Business Manager **System User** token, so clients
+never log in — their assets just need to be shared with the Outmark agency
+Business Manager (which onboarding already asks for).
+
+One-time setup:
+
+1. **developers.facebook.com → My Apps → Create app** → type *Business* →
+   connect it to the Outmark agency Business Manager.
+2. **Business Settings → Users → System Users → Add** (role: Admin) →
+   **Assign assets**: every client Page, Instagram account and ad account.
+3. Same screen → **Generate token** → pick the app → permissions
+   `instagram_basic`, `instagram_manage_insights`, `pages_show_list`,
+   `pages_read_engagement`, `ads_read`, `business_management`. Copy it.
+4. **Vercel → Settings → Environment Variables** (Production):
+   `META_SYSTEM_USER_TOKEN`, `META_BUSINESS_ID` (Business Settings →
+   Business info), `CRON_SECRET` (any long random string). Redeploy.
+5. Run `supabase/migrations/0014_meta_sync.sql` in the Supabase SQL editor.
+6. Admin → client → **Meta** tab → pick the Instagram account (+ ad account)
+   → **Connect** → **Sync now**.
+
+`vercel.json` schedules `/api/cron/meta-sync` daily at 10:00 UTC (current +
+previous month per client). Rows the sync writes carry `source = 'meta'`;
+anything saved by hand becomes `'manual'` and is never overwritten.
+
 ## Backups
 
 Supabase auto-backs up the DB daily on the free tier (single most recent

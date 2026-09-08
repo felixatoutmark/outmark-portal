@@ -34,6 +34,7 @@ export async function middleware(request: NextRequest) {
     path.startsWith("/invite") ||
     path.startsWith("/auth") ||           // OAuth / magic-link callback
     path.startsWith("/api/invite/") ||    // invite-accept endpoint
+    path.startsWith("/api/cron/") ||      // Vercel Cron — self-guarded by CRON_SECRET
     path.startsWith("/_next") ||
     path.startsWith("/api/public");
 

@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase-browser";
 
-const TABS = ["Overview","Metrics","Content","Goals","Deliverables","Invoices","Requests","Feedback","Settings","Activity"] as const;
+const TABS = ["Overview","Metrics","Meta","Content","Goals","Deliverables","Invoices","Requests","Feedback","Settings","Activity"] as const;
 
 const MOOD_EMOJI: Record<number, string> = { 1: "😞", 2: "🙁", 3: "😐", 4: "🙂", 5: "😄" };
 const MOOD_LABEL: Record<number, string> = { 1: "Unhappy", 2: "Disappointed", 3: "Neutral", 4: "Happy", 5: "Thrilled" };
@@ -42,6 +42,7 @@ export default function AdminClientPanels(p: any) {
       <div className="pt-6">
         {tab === "Overview"     && <Overview {...p} />}
         {tab === "Metrics"      && <Metrics  {...p} />}
+        {tab === "Meta"         && <MetaPanel {...p} />}
         {tab === "Content"      && <Content  {...p} />}
         {tab === "Goals"        && <Goals    {...p} />}
         {tab === "Deliverables" && <Deliverables {...p} />}
@@ -107,7 +108,14 @@ function Metrics({ client, metrics }: any) {
     obj.paid_spend = obj.paid_spend === "" ? null : Number(obj.paid_spend);
     obj.roas       = obj.roas === ""       ? null : Number(obj.roas);
     obj.client_id = client.id;
-    await sb.from("dashboard_metrics").upsert(obj, { onConflict: "client_id,period_start,period_end" });
+    obj.source = "manual"; // hand-entered → the Meta sync must not overwrite it
+    let { error } = await sb.from("dashboard_metrics").upsert(obj, { onConflict: "client_id,period_start,period_end" });
+    if (error && /source/.test(error.message)) {
+      // DB predates migration 0014 — save without the provenance flag rather than lose the numbers.
+      delete obj.source;
+      ({ error } = await sb.from("dashboard_metrics").upsert(obj, { onConflict: "client_id,period_start,period_end" }));
+    }
+    if (error) { alert(`Save failed: ${error.message}`); return; }
     location.reload();
   }
   return (
@@ -168,7 +176,10 @@ function MetricRow({ m }: { m: any }) {
     try {
       const patch: any = { period_start: periodStart, period_end: periodEnd };
       for (const f of METRIC_FIELDS) patch[f.key] = vals[f.key] === "" ? null : Number(vals[f.key]);
-      const { error } = await sb.from("dashboard_metrics").update(patch).eq("id", m.id);
+      let { error } = await sb.from("dashboard_metrics").update({ ...patch, source: "manual" }).eq("id", m.id);
+      if (error && /source/.test(error.message)) {
+        ({ error } = await sb.from("dashboard_metrics").update(patch).eq("id", m.id));
+      }
       if (error) throw error;
       location.reload();
     } catch (err: any) {
@@ -1321,6 +1332,167 @@ function Feedback({ feedback }: any) {
             ))}
           </div>
         ) : <div className="text-[--muted] text-[14px]">No feedback yet.</div>}
+      </Card>
+    </div>
+  );
+}
+
+function MetaPanel({ client, metaConn }: any) {
+  const [assets, setAssets] = useState<any>(null);
+  const [assetsErr, setAssetsErr] = useState<string | null>(null);
+  const [env, setEnv] = useState<any>(null);
+  const [busy, setBusy] = useState<"save" | "sync" | "disconnect" | null>(null);
+  const [igId, setIgId] = useState<string>(metaConn?.ig_user_id ?? "");
+  const [adId, setAdId] = useState<string>(metaConn?.ad_account_id ?? "");
+  const [enabled, setEnabled] = useState<boolean>(metaConn?.sync_enabled ?? true);
+
+  useEffect(() => {
+    fetch("/api/admin/meta?action=assets")
+      .then(async (r) => {
+        const j = await r.json().catch(() => null);
+        setEnv(j?.env ?? null);
+        if (!r.ok || !j?.success) { setAssetsErr(j?.error ?? `HTTP ${r.status}`); return; }
+        setAssets(j);
+      })
+      .catch((e) => setAssetsErr(String(e?.message ?? e)));
+  }, []);
+
+  async function post(body: any) {
+    const res = await fetch("/api/admin/meta", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_id: client.id, ...body }),
+    });
+    const j = await res.json().catch(() => null);
+    if (!res.ok || !j?.success) throw new Error(j?.error ?? `HTTP ${res.status}`);
+    return j;
+  }
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    if (!/^\d{5,}$/.test(igId.trim())) { alert("Pick an Instagram account (or paste its numeric id)."); return; }
+    const picked = (assets?.ig ?? []).find((a: any) => a.id === igId.trim());
+    const unchanged = metaConn && metaConn.ig_user_id === igId.trim();
+    setBusy("save");
+    try {
+      await post({
+        action: "save", ig_user_id: igId.trim(),
+        ig_username: picked?.username ?? (unchanged ? metaConn.ig_username : null),
+        page_id: picked?.page_id ?? (unchanged ? metaConn.page_id : null),
+        ad_account_id: adId.trim(), sync_enabled: enabled,
+      });
+      location.reload();
+    } catch (err: any) { alert(`Save failed: ${err.message}`); }
+    finally { setBusy(null); }
+  }
+
+  async function syncNow() {
+    setBusy("sync");
+    try {
+      const j = await post({ action: "sync" });
+      const lines = (j.summaries ?? []).map((s: any) =>
+        `${s.month.slice(0, 7)}: metrics ${s.metrics} · paid ${s.paid} · reels ${s.reels}` +
+        (s.errors?.length ? `\n   ⚠ ${s.errors.slice(0, 3).join("\n   ⚠ ")}` : ""));
+      alert(`Sync finished\n\n${lines.join("\n")}`);
+      location.reload();
+    } catch (err: any) { alert(`Sync failed: ${err.message}`); }
+    finally { setBusy(null); }
+  }
+
+  async function disconnect() {
+    if (!confirm("Disconnect Meta for this client? Already-synced data stays; it just stops updating.")) return;
+    setBusy("disconnect");
+    try { await post({ action: "disconnect" }); location.reload(); }
+    catch (err: any) { alert(`Failed: ${err.message}`); }
+    finally { setBusy(null); }
+  }
+
+  const igOptions: any[] = assets?.ig ?? [];
+  const adOptions: any[] = assets?.adAccounts ?? [];
+  const fmt = (iso: string | null) => iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "never";
+  const missingEnv = env ? [!env.token && "META_SYSTEM_USER_TOKEN", !env.business && "META_BUSINESS_ID", !env.cron && "CRON_SECRET"].filter(Boolean) : [];
+
+  return (
+    <div className="space-y-4">
+      <Card title="Meta sync status">
+        <KV k="Connection" v={metaConn ? `Connected · @${metaConn.ig_username ?? metaConn.ig_user_id}` : "Not connected"} />
+        <KV k="Ad account" v={metaConn?.ad_account_id ?? "— (no paid numbers)"} />
+        <KV k="Auto-sync" v={metaConn ? (metaConn.sync_enabled ? "On · daily, ~6am Toronto" : "Paused") : "—"} />
+        <KV k="Last synced" v={fmt(metaConn?.last_synced_at ?? null)} />
+        {metaConn?.last_sync_error && (
+          <div className="mt-2 text-[12px] text-red-700 whitespace-pre-wrap">Last sync warnings: {metaConn.last_sync_error}</div>
+        )}
+        {missingEnv.length > 0 && (
+          <div className="mt-2 text-[12px] text-amber-700">
+            Not set in Vercel → Settings → Environment Variables: {missingEnv.join(", ")}. See README → "Meta sync".
+          </div>
+        )}
+        {metaConn && (
+          <div className="flex gap-2 mt-3">
+            <button onClick={syncNow} disabled={busy !== null} className="btn-primary text-[13px]">
+              {busy === "sync" ? "Syncing… (can take up to a minute)" : "Sync now"}
+            </button>
+            <button onClick={disconnect} disabled={busy !== null} className="btn-ghost text-[13px]">Disconnect</button>
+          </div>
+        )}
+      </Card>
+
+      <form onSubmit={save} className="card p-5 space-y-3">
+        <h3 className="font-bold">{metaConn ? "Change connection" : "Connect Instagram + ads"}</h3>
+        <p className="text-[12px] text-[--muted]">
+          The lists show the accounts your Business Manager owns or has partner access to. If a client
+          is missing, have them share their Page, Instagram account and ad account with your Business
+          Manager first — then reload this tab.
+        </p>
+        {assetsErr && <div className="text-[12px] text-red-700">Couldn't load accounts from Meta: {assetsErr}</div>}
+        {assets?.errors?.length > 0 && <div className="text-[12px] text-amber-700">Partial list — {assets.errors.join(" · ")}</div>}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label className="label-text mb-1 block">Instagram account</label>
+            {igOptions.length ? (
+              <select className="input" value={igId} onChange={(e) => setIgId(e.target.value)}>
+                <option value="">— pick —</option>
+                {igId && !igOptions.some((a: any) => a.id === igId) && (
+                  <option value={igId}>@{metaConn?.ig_username ?? igId} (saved — not in the current list)</option>
+                )}
+                {igOptions.map((a: any) => (
+                  <option key={a.id} value={a.id}>@{a.username ?? a.id}{a.page_name ? ` · ${a.page_name}` : ""} ({a.via})</option>
+                ))}
+              </select>
+            ) : (
+              <input className="input" value={igId} onChange={(e) => setIgId(e.target.value)} placeholder="Numeric Instagram account id (17841…)" />
+            )}
+          </div>
+          <div>
+            <label className="label-text mb-1 block">Ad account (optional — for paid numbers)</label>
+            {adOptions.length ? (
+              <select className="input" value={adId} onChange={(e) => setAdId(e.target.value)}>
+                <option value="">— none —</option>
+                {adId && !adOptions.some((a: any) => a.id === adId) && (
+                  <option value={adId}>{adId} (saved — not in the current list)</option>
+                )}
+                {adOptions.map((a: any) => <option key={a.id} value={a.id}>{a.name} · {a.id} ({a.via})</option>)}
+              </select>
+            ) : (
+              <input className="input" value={adId} onChange={(e) => setAdId(e.target.value)} placeholder="Numeric ad account id (without act_)" />
+            )}
+          </div>
+        </div>
+        <label className="flex items-center gap-2 text-[13px]">
+          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Auto-sync daily
+        </label>
+        <button className="btn-primary text-[13px]" disabled={busy !== null}>
+          {busy === "save" ? "Saving…" : metaConn ? "Update connection" : "Connect"}
+        </button>
+      </form>
+
+      <Card title="What gets synced">
+        <ul className="text-[13px] space-y-1 list-disc pl-4 text-[--muted]">
+          <li><b className="text-[--fg]">Metrics tab</b> — organic reach and followers gained (net follows − unfollows); plus paid reach / spend / ROAS when an ad account is set. One row per calendar month; each run refreshes the current and previous month.</li>
+          <li><b className="text-[--fg]">Top 3 winning reels</b> — the month's reels ranked by views, thumbnails cached.</li>
+          <li><b className="text-[--fg]">Still manual:</b> profile visits and website clicks — Meta removed those from the API in 2025 — plus hours, goals, deliverables and the top ad.</li>
+          <li>Anything you edit by hand is marked <i>manual</i>; the sync never touches a month that has a manual row.</li>
+          <li>Numbers can differ slightly from the Instagram app — Meta's API and its app compute a few metrics differently.</li>
+        </ul>
       </Card>
     </div>
   );

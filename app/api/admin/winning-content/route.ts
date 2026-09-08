@@ -1,10 +1,11 @@
 // Admin endpoint: upsert / delete a client's "Top 3 winning reels" entries.
 // POST resolves a thumbnail server-side (og:image / oEmbed), downloads it and
 // caches it in the public `thumbnails` bucket — IG/TikTok image URLs are
-// signed and expire, so we must serve our own copy.
+// signed and expire, so we must serve our own copy. Rows saved here are
+// source = 'manual' and the Meta sync leaves them alone.
 import { NextResponse, type NextRequest } from "next/server";
-import { createClient, createServiceClient } from "@/lib/supabase-server";
-import { resolveThumbnail, downloadImage } from "@/lib/thumbnail";
+import { createClient } from "@/lib/supabase-server";
+import { cacheThumbnail, uploadToBucket } from "@/lib/thumbnail-cache";
 
 async function requireAdminSession() {
   const supabase = await createClient();
@@ -15,35 +16,7 @@ async function requireAdminSession() {
   return { supabase, error: null };
 }
 
-const EXT_BY_TYPE: Record<string, string> = {
-  "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif", "image/avif": "avif",
-};
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
-
-async function uploadToBucket(
-  clientId: string, month: string, position: number, bytes: Uint8Array, contentType: string,
-): Promise<string | null> {
-  const ext = EXT_BY_TYPE[contentType.split(";")[0].trim()] ?? "jpg";
-  const path = `${clientId}/${month}-${position}-${Date.now()}.${ext}`;
-  const svc = createServiceClient();
-  const { error } = await svc.storage.from("thumbnails").upload(path, bytes, { contentType, upsert: true });
-  if (error) return null;
-  return svc.storage.from("thumbnails").getPublicUrl(path).data.publicUrl;
-}
-
-// Resolve + download + cache. Falls back to the remote URL if caching fails,
-// and to null if nothing could be resolved at all. When `directImage` is set
-// the URL is treated as the image itself (admin pasted it) — still cached,
-// since hotlinked IG/TikTok CDN URLs expire.
-async function cacheThumbnail(
-  clientId: string, month: string, position: number, sourceUrl: string, directImage = false,
-): Promise<string | null> {
-  const remote = directImage ? sourceUrl : await resolveThumbnail(sourceUrl);
-  if (!remote) return null;
-  const img = await downloadImage(remote);
-  if (!img) return remote; // better a temporary remote URL than nothing
-  return (await uploadToBucket(clientId, month, position, img.bytes, img.contentType)) ?? remote;
-}
 
 export async function POST(req: NextRequest) {
   const { supabase, error } = await requireAdminSession();
@@ -92,22 +65,24 @@ export async function POST(req: NextRequest) {
     if (!thumbnail_url && existing && existing.url === url) thumbnail_url = existing.thumbnail_url;
   }
 
-  const { data, error: dbErr } = await supabase
-    .from("winning_content")
-    .upsert(
-      {
-        client_id: clientId,
-        month,
-        position,
-        url,
-        thumbnail_url,
-        title: String(body.title ?? "").trim() || null,
-        metric_label: String(body.metric_label ?? "").trim() || null,
-      },
-      { onConflict: "client_id,month,position" },
-    )
-    .select()
-    .single();
+  const row: Record<string, unknown> = {
+    client_id: clientId,
+    month,
+    position,
+    url,
+    thumbnail_url,
+    title: String(body.title ?? "").trim() || null,
+    metric_label: String(body.metric_label ?? "").trim() || null,
+    source: "manual",
+  };
+  let { data, error: dbErr } = await supabase
+    .from("winning_content").upsert(row, { onConflict: "client_id,month,position" }).select().single();
+  if (dbErr && /source/.test(dbErr.message)) {
+    // DB predates migration 0014 (no `source` column yet) — save without the flag.
+    delete row.source;
+    ({ data, error: dbErr } = await supabase
+      .from("winning_content").upsert(row, { onConflict: "client_id,month,position" }).select().single());
+  }
   if (dbErr) return NextResponse.json({ success: false, error: dbErr.message }, { status: 500 });
 
   return NextResponse.json({ success: true, row: data, thumbnail_resolved: !!thumbnail_url });

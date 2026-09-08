@@ -12,7 +12,7 @@ export default async function AdminClientDetail({ params }: { params: Promise<{ 
   const { id } = await params;
   const sb = await createClient();
 
-  const [{ data: client }, metricsRes, contentRes, deliverablesRes, docsRes, reqsRes, notesRes, prefsRes, filmingRes, progressRes, goalsRes, feedbackRes, hoursRes, winningRes, topAdsRes] = await Promise.all([
+  const [{ data: client }, metricsRes, contentRes, deliverablesRes, docsRes, reqsRes, notesRes, prefsRes, filmingRes, progressRes, goalsRes, feedbackRes, hoursRes, winningRes, topAdsRes, metaRes] = await Promise.all([
     sb.from("clients").select("*").eq("id", id).single(),
     sb.from("dashboard_metrics").select("*").eq("client_id", id).order("period_end", { ascending: false }),
     sb.from("content_items").select("*").eq("client_id", id).order("created_at", { ascending: false }),
@@ -28,6 +28,7 @@ export default async function AdminClientDetail({ params }: { params: Promise<{ 
     sb.from("monthly_hours").select("*").eq("client_id", id).order("month", { ascending: false }),
     sb.from("winning_content").select("*").eq("client_id", id).order("month", { ascending: false }).order("position"),
     sb.from("top_ad").select("*").eq("client_id", id).order("month", { ascending: false }),
+    sb.from("meta_connections").select("*").eq("client_id", id).maybeSingle(),
   ]);
   if (!client) notFound();
 
@@ -60,6 +61,7 @@ export default async function AdminClientDetail({ params }: { params: Promise<{ 
         hours={hoursRes.data ?? []}
         winning={winningRes.data ?? []}
         topAds={topAdsRes.data ?? []}
+        metaConn={metaRes.data ?? null}
       />
     </div>
   );
