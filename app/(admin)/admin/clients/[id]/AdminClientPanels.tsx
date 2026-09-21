@@ -1259,6 +1259,20 @@ function Documents({ client, documents }: any) {
     } catch (err: any) { alert(err.message); }
     finally { setUploading(false); }
   }
+  const [removing, setRemoving] = useState<string | null>(null);
+  async function removeInvoice(d: any) {
+    if (!window.confirm(`Remove "${d.filename}"?\n\nIt disappears from the client's Billing page and the file is deleted.`)) return;
+    setRemoving(d.id);
+    try {
+      // Row first, so the client stops seeing it even if the file cleanup fails.
+      const { error } = await sb.from("documents").delete().eq("id", d.id);
+      if (error) throw error;
+      if (d.file_url) await sb.storage.from("client-files").remove([d.file_url]).then(() => {}, () => {});
+      location.reload();
+    } catch (err: any) {
+      alert(`Remove failed: ${err.message ?? err}`);
+    } finally { setRemoving(null); }
+  }
   const invoices = (documents ?? []).filter((d: any) => d.type === "invoice");
   return (
     <div className="space-y-4">
@@ -1269,13 +1283,20 @@ function Documents({ client, documents }: any) {
       </div>
       <div className="card overflow-hidden">
         <table className="w-full text-[13px]">
-          <thead className="bg-[--warm]"><tr><Th>Filename</Th><Th>Uploaded</Th></tr></thead>
+          <thead className="bg-[--warm]"><tr><Th>Filename</Th><Th>Uploaded</Th><Th></Th></tr></thead>
           <tbody>{invoices.map((d: any) => (
             <tr key={d.id} className="border-t border-[--border]">
               <Td>{d.filename}</Td>
               <Td>{new Date(d.uploaded_at).toLocaleDateString()}</Td>
+              <Td className="text-right">
+                <button
+                  disabled={removing !== null}
+                  onClick={() => removeInvoice(d)}
+                  className="text-[11px] px-2 py-1 rounded-pill border border-red-200 text-red-700 hover:bg-red-50"
+                >{removing === d.id ? "Removing…" : "Remove"}</button>
+              </Td>
             </tr>
-          ))}{!invoices.length && <tr><td colSpan={2} className="p-4 text-center text-[--muted]">No invoices uploaded yet.</td></tr>}</tbody>
+          ))}{!invoices.length && <tr><td colSpan={3} className="p-4 text-center text-[--muted]">No invoices uploaded yet.</td></tr>}</tbody>
         </table>
       </div>
     </div>
