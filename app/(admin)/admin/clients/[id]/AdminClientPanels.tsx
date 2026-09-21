@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase-browser";
-import { trackingWindowStart } from "@/lib/meta-util";
+import { trackingWindowStart, normalizeLeadTypes, leadTypeWarnings } from "@/lib/meta-util";
 
 const TABS = ["Overview","Metrics","Meta","Content","Goals","Deliverables","Invoices","Requests","Feedback","Settings","Activity"] as const;
 
@@ -99,14 +99,17 @@ function Overview({ client, prefs, filming, progress }: any) {
 // MANUAL OVERRIDE (any hand-entered row → sync paused for that month, your
 // numbers are the truth) or empty. Profile visits / website clicks are never
 // provided by Meta, so they stay hand-editable even on a Meta month.
-const METRIC_FIELDS: { key: string; label: string; step?: string; fromMeta: boolean; paid?: boolean }[] = [
-  { key: "organic_reach",    label: "Organic reach",    fromMeta: true },
-  { key: "paid_reach",       label: "Paid reach",       fromMeta: true, paid: true },
-  { key: "profile_visits",   label: "Profile visits",   fromMeta: false },
-  { key: "website_clicks",   label: "Website clicks",   fromMeta: false },
-  { key: "paid_spend",       label: "Paid spend ($)", step: "0.01", fromMeta: true, paid: true },
-  { key: "roas",             label: "ROAS (x)", step: "0.01", fromMeta: true, paid: true },
-  { key: "followers_gained", label: "Followers gained", fromMeta: true },
+type MetricField = { key: string; label: string; short: string; step?: string; fromMeta: boolean; paid?: boolean; leads?: boolean };
+const METRIC_FIELDS: MetricField[] = [
+  { key: "organic_reach",    label: "Organic reach",    short: "Organic",   fromMeta: true },
+  { key: "paid_reach",       label: "Paid reach",       short: "Paid",      fromMeta: true, paid: true },
+  { key: "profile_visits",   label: "Profile visits",   short: "Visits",    fromMeta: false },
+  { key: "website_clicks",   label: "Website clicks",   short: "Clicks",    fromMeta: false },
+  { key: "paid_spend",       label: "Paid spend ($)",   short: "Spend",     step: "0.01", fromMeta: true, paid: true },
+  { key: "roas",             label: "ROAS (x)",         short: "ROAS",      step: "0.01", fromMeta: true, paid: true },
+  // Counted from the ad account's Lead action events — see the Meta tab.
+  { key: "leads",            label: "Leads",            short: "Leads",     fromMeta: true, paid: true, leads: true },
+  { key: "followers_gained", label: "Followers gained", short: "Followers", fromMeta: true },
 ];
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
@@ -125,8 +128,10 @@ function monthLabelOf(key: string) {
   return { month: new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-US", { month: "long", timeZone: "UTC" }), year: String(y) };
 }
 
-function Metrics({ client, metrics, metaConn }: any) {
+function Metrics({ client, metrics, metaConn, leadsReady }: any) {
   const connected = !!metaConn;
+  // The leads column only exists once migration 0015 has run.
+  const fields = METRIC_FIELDS.filter((f) => !f.leads || leadsReady);
   const nowKey = utcMonthKey();
   const [earlier, setEarlier] = useState(0);
 
@@ -175,7 +180,7 @@ function Metrics({ client, metrics, metaConn }: any) {
       <div className="card overflow-x-auto">
         <table className="w-full text-[13px]">
           <thead className="bg-[--warm]"><tr>
-            <Th>Month</Th><Th>Status</Th><Th>Organic</Th><Th>Paid</Th><Th>Visits</Th><Th>Clicks</Th><Th>Spend</Th><Th>ROAS</Th><Th>Followers</Th><Th></Th>
+            <Th>Month</Th><Th>Status</Th>{fields.map((f) => <Th key={f.key}>{f.short}</Th>)}<Th></Th>
           </tr></thead>
           <tbody>
             {keys.map((k) => {
@@ -183,12 +188,17 @@ function Metrics({ client, metrics, metaConn }: any) {
               const stamp = monthRows.map((r: any) => `${r.id}:${r.updated_at}`).join("|");
               return (
                 <MonthRow key={`${k}-${stamp}`} client={client} monthKey={k} nowKey={nowKey}
-                  monthRows={monthRows} metaConn={metaConn ?? null} />
+                  monthRows={monthRows} metaConn={metaConn ?? null} fields={fields} />
               );
             })}
           </tbody>
         </table>
       </div>
+      {!leadsReady && (
+        <div className="text-[12px] text-amber-700">
+          Leads column hidden — run <code>supabase/migrations/0015_leads.sql</code> in the Supabase SQL editor to enable it.
+        </div>
+      )}
       <button className="btn-ghost text-[12px]" onClick={() => setEarlier((n) => n + 6)} disabled={from <= floor}>
         Show earlier months{hiddenOlder ? " (there is older data)" : ""}
       </button>
@@ -196,10 +206,12 @@ function Metrics({ client, metrics, metaConn }: any) {
   );
 }
 
-function MonthRow({ client, monthKey, nowKey, monthRows, metaConn }: any) {
+function MonthRow({ client, monthKey, nowKey, monthRows, metaConn, fields }: any) {
   const sb = createClient();
   const connected = !!metaConn;
   const hasAdAccount = !!metaConn?.ad_account_id;
+  const hasLeadEvents = Array.isArray(metaConn?.lead_action_types) && metaConn.lead_action_types.length > 0;
+  const FIELDS: MetricField[] = fields;
   const b = monthBounds(monthKey);
   // Same pick as the client dashboard: the full-month row if there is one, else
   // the latest period_end (rows arrive sorted that way).
@@ -211,7 +223,7 @@ function MonthRow({ client, monthKey, nowKey, monthRows, metaConn }: any) {
   const auto = connected && metaConn.sync_enabled && monthKey >= shiftMonthKey(nowKey, -1);
 
   const initialVals = () =>
-    Object.fromEntries(METRIC_FIELDS.map((f) => [f.key, row?.[f.key] == null ? "" : String(row[f.key])]));
+    Object.fromEntries(FIELDS.map((f) => [f.key, row?.[f.key] == null ? "" : String(row[f.key])]));
   const [editing, setEditing] = useState(false);
   const [override, setOverrideState] = useState(false); // Meta month: unlock the Meta-provided fields
   const [busy, setBusy] = useState<null | "save" | "sync" | "delete">(null);
@@ -220,8 +232,9 @@ function MonthRow({ client, monthKey, nowKey, monthRows, metaConn }: any) {
   const label = `${month} ${year}`;
 
   // While connected, Meta owns these fields on a Meta month (paid ones only with an ad account).
-  const metaOwned = (f: (typeof METRIC_FIELDS)[number]) => connected && f.fromMeta && (!f.paid || hasAdAccount);
-  const locked = (f: (typeof METRIC_FIELDS)[number]) => status === "meta" && !override && metaOwned(f);
+  const metaOwned = (f: MetricField) =>
+    connected && f.fromMeta && (!f.paid || hasAdAccount) && (!f.leads || hasLeadEvents);
+  const locked = (f: MetricField) => status === "meta" && !override && metaOwned(f);
   function setOverride(on: boolean) {
     setOverrideState(on);
     if (!on) setVals(initialVals()); // drop abandoned edits to Meta's numbers
@@ -266,8 +279,10 @@ function MonthRow({ client, monthKey, nowKey, monthRows, metaConn }: any) {
     setBusy("save");
     try {
       const patch: any = { period_start: b.start, period_end: b.end };
-      for (const f of METRIC_FIELDS) {
-        if (manualSave || !metaOwned(f)) patch[f.key] = vals[f.key] === "" ? null : Number(vals[f.key]);
+      for (const f of FIELDS) {
+        if (!(manualSave || !metaOwned(f))) continue;
+        const n = vals[f.key] === "" ? null : Number(vals[f.key]);
+        patch[f.key] = n != null && !f.step ? Math.round(n) : n; // count columns are integers
       }
       if (manualSave) patch.source = "manual";
       if (row) {
@@ -302,7 +317,7 @@ function MonthRow({ client, monthKey, nowKey, monthRows, metaConn }: any) {
     } finally { setBusy(null); }
   }
 
-  const fmt = (f: (typeof METRIC_FIELDS)[number]) => {
+  const fmt = (f: MetricField) => {
     const v = row?.[f.key];
     if (v == null) return "—";
     if (f.key === "paid_spend") return `$${Number(v).toLocaleString("en-US")}`;
@@ -342,7 +357,7 @@ function MonthRow({ client, monthKey, nowKey, monthRows, metaConn }: any) {
       <tr className="border-t border-[--border]">
         {monthCell}
         {statusCell}
-        {METRIC_FIELDS.map((f) => <Td key={f.key}>{fmt(f)}</Td>)}
+        {FIELDS.map((f) => <Td key={f.key}>{fmt(f)}</Td>)}
         <Td className="text-right whitespace-nowrap">
           {connected && status === "meta" && (
             <button disabled={busy !== null} className="btn-ghost !py-1 !text-[11px]" onClick={() => syncFromMeta(false)}>
@@ -372,7 +387,7 @@ function MonthRow({ client, monthKey, nowKey, monthRows, metaConn }: any) {
       <tr className="border-t border-[--border] bg-[--warm]/50 align-top">
         {monthCell}
         {statusCell}
-        {METRIC_FIELDS.map((f) => (
+        {FIELDS.map((f) => (
           <Td key={f.key}>
             <input
               type="number"
@@ -391,7 +406,7 @@ function MonthRow({ client, monthKey, nowKey, monthRows, metaConn }: any) {
         </Td>
       </tr>
       <tr className="bg-[--warm]/50">
-        <td colSpan={10} className="px-3 pb-3 text-[12px] text-[--muted]">
+        <td colSpan={FIELDS.length + 3} className="px-3 pb-3 text-[12px] text-[--muted]">
           <div className="flex items-center justify-between gap-3 flex-wrap">
             {status === "meta" && connected ? (
               <label className="flex items-center gap-2">
@@ -1731,15 +1746,134 @@ function MetaPanel({ client, metaConn }: any) {
         </button>
       </form>
 
+      {metaConn?.ad_account_id && <LeadEventsCard client={client} metaConn={metaConn} />}
+
       <Card title="What gets synced">
         <ul className="text-[13px] space-y-1 list-disc pl-4 text-[--muted]">
           <li><b className="text-[--fg]">Metrics tab</b> — organic reach and followers gained (net follows − unfollows); plus paid reach / spend / ROAS when an ad account is set. One row per calendar month; each run refreshes the current and previous month.</li>
+          <li><b className="text-[--fg]">Leads</b> — counted from the ad account's Lead <i>events</i> (configurable above), never from a campaign's “results”, which can be a proxy like a second page view.</li>
           <li><b className="text-[--fg]">Top 3 winning reels</b> — the month's reels ranked by views, thumbnails cached.</li>
           <li><b className="text-[--fg]">Still manual:</b> profile visits and website clicks — Meta removed those from the API in 2025 — plus hours, goals, deliverables and the top ad.</li>
           <li><b className="text-[--fg]">Live vs. manual, per month:</b> in the Metrics tab every month is either from Meta or a <i>Manual override</i> (sync paused, your numbers are the truth). “Resume sync” hands a month back to Meta. The daily run refreshes the current and previous month (<i>Live</i>) and fills in empty earlier months a couple per day; closed months are final, and top-3 reels for older months are pulled on demand in the Content tab.</li>
           <li>Numbers can differ slightly from the Instagram app — Meta's API and its app compute a few metrics differently.</li>
         </ul>
       </Card>
+    </div>
+  );
+}
+
+function LeadEventsCard({ client, metaConn }: any) {
+  const ready = Array.isArray(metaConn.lead_action_types);
+  const [events, setEvents] = useState<any[] | null>(null);
+  const [picked, setPicked] = useState<string[]>(ready ? metaConn.lead_action_types : []);
+  const [showAll, setShowAll] = useState(false);
+  const [busy, setBusy] = useState<null | "load" | "save">(null);
+  // Rows ticked or unticked this session stay visible, so unticking can be undone.
+  const [touched, setTouched] = useState<string[]>([]);
+
+  async function load() {
+    setBusy("load");
+    try {
+      const res = await fetch(`/api/admin/meta?action=lead_events&client_id=${client.id}`);
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j?.success) throw new Error(j?.error ?? `HTTP ${res.status}`);
+      setEvents(j.events);
+      setPicked(j.selected ?? []);
+    } catch (err: any) { alert(`Couldn't load events from Meta: ${err.message}`); }
+    finally { setBusy(null); }
+  }
+
+  async function save() {
+    setBusy("save");
+    try {
+      const res = await fetch("/api/admin/meta", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "save_lead_events", client_id: client.id, lead_action_types: picked }),
+      });
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j?.success) throw new Error(j?.error ?? `HTTP ${res.status}`);
+      const notes = [
+        j.dropped?.length ? `Left out (already included in a selected total): ${j.dropped.join(", ")}.` : "",
+        j.recounted ? `Recounted ${j.recounted} Meta-synced month${j.recounted === 1 ? "" : "s"} with the new definition.` : "",
+        j.blanked ? `${j.blanked} month${j.blanked === 1 ? "" : "s"} couldn't be recounted (no ad data, or out of time) — their leads were cleared, press “Sync now” on them in the Metrics tab.` : "",
+      ].filter(Boolean);
+      alert(["Saved.", ...notes].join("\n\n"));
+      location.reload();
+    } catch (err: any) { alert(`Save failed: ${err.message}`); }
+    finally { setBusy(null); }
+  }
+
+  const toggle = (t: string) => {
+    setTouched((x) => (x.includes(t) ? x : [...x, t]));
+    setPicked((p) => (p.includes(t) ? p.filter((x) => x !== t) : [...p, t]));
+  };
+  const visible = (events ?? []).filter((e) => showAll || e.suggested || picked.includes(e.type) || touched.includes(e.type));
+  // Same rules the server applies on save.
+  const pickedDropped = normalizeLeadTypes(picked).dropped;
+  const pickedWarnings = leadTypeWarnings(picked);
+  const savedWarnings = ready ? leadTypeWarnings(metaConn.lead_action_types) : [];
+  const saved: string[] = ready ? metaConn.lead_action_types : [];
+  const unchanged = picked.length === saved.length && picked.every((t) => saved.includes(t));
+
+  return (
+    <div className="card p-5 space-y-3">
+      <div>
+        <h3 className="font-bold">What counts as a lead</h3>
+        <p className="text-[12px] text-[--muted]">
+          Leads are counted from the ad account's <b>events</b> — never from a campaign's “results”. A campaign can
+          optimise for a proxy (for example a Contact event fired on a second page view), and that number isn't leads.
+          Pick the event(s) that are a real lead for this client; the monthly total is their sum. Untick everything
+          to enter leads by hand instead (phone calls, CRM…).
+        </p>
+      </div>
+      {!ready ? (
+        <div className="text-[12px] text-amber-700">Run <code>supabase/migrations/0015_leads.sql</code> in the Supabase SQL editor to enable leads.</div>
+      ) : (
+        <>
+          <div className="text-[13px]">
+            <span className="text-[--muted]">Currently counting: </span>
+            {metaConn.lead_action_types.length
+              ? metaConn.lead_action_types.map((t: string) => <code key={t} className="mr-1.5">{t}</code>)
+              : <span className="text-amber-700">nothing — leads are entered by hand</span>}
+          </div>
+          {!events && savedWarnings.map((w) => <div key={w} className="text-[12px] text-amber-700">{w}</div>)}
+          {!events ? (
+            <button type="button" className="btn-ghost text-[13px]" onClick={load} disabled={busy !== null}>
+              {busy === "load" ? "Loading from Meta…" : "Review this account's events"}
+            </button>
+          ) : (
+            <>
+              <div className="border border-[--border] rounded-lg divide-y divide-[--border]">
+                {visible.map((e) => (
+                  <label key={e.type} className="flex items-center gap-3 px-3 py-2 text-[13px] cursor-pointer">
+                    <input type="checkbox" checked={picked.includes(e.type)} disabled={busy !== null} onChange={() => toggle(e.type)} />
+                    <span className="flex-1 min-w-0">
+                      <span className="block">{e.label}</span>
+                      {e.label !== e.type && <code className="text-[11px] text-[--subtle]">{e.type}</code>}
+                    </span>
+                    <span className="text-[--muted] whitespace-nowrap">{Number(e.count).toLocaleString("en-US")} <span className="text-[11px]">last 90 days</span></span>
+                  </label>
+                ))}
+                {!visible.length && <div className="px-3 py-2 text-[13px] text-[--muted]">No lead-like events recorded in the last 90 days.</div>}
+              </div>
+              {pickedDropped.length > 0 && (
+                <div className="text-[12px] text-amber-700">
+                  Already included in a total you picked, so it will be left out to avoid counting twice: {pickedDropped.join(", ")}.
+                </div>
+              )}
+              {pickedWarnings.map((w) => <div key={w} className="text-[12px] text-amber-700">{w}</div>)}
+              <div className="flex items-center gap-3 flex-wrap">
+                <button type="button" className="btn-primary text-[13px]" onClick={save} disabled={busy !== null}>
+                  {busy === "save" ? "Saving + recounting months… (up to a minute)" : unchanged ? "Recount leads for all months" : "Save lead events"}
+                </button>
+                <label className="flex items-center gap-2 text-[12px] text-[--muted]">
+                  <input type="checkbox" checked={showAll} onChange={(e) => setShowAll(e.target.checked)} /> Show every event type
+                </label>
+              </div>
+            </>
+          )}
+        </>
+      )}
     </div>
   );
 }

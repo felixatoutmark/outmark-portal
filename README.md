@@ -127,7 +127,12 @@ A daily cron pulls each connected client's Instagram account insights
 (organic reach, net followers gained), the month's top 3 reels and paid-ad
 numbers (reach, spend, ROAS) into `dashboard_metrics` / `winning_content`.
 Profile visits and website clicks stay manual — Meta removed those metrics
-from the API in January 2025. Uses a Business Manager **System User** token, so clients
+from the API in January 2025. **Leads** are counted from the ad account's
+action *events* (`actions` + `conversions`), never from a campaign's
+"results" — a campaign can optimise for a proxy such as a Contact event fired
+on a second page view. Which events count as a lead is set per client in the
+Meta tab (default: Meta's standard Lead event); changing it recounts every
+Meta-synced month. Needs `supabase/migrations/0015_leads.sql`. Uses a Business Manager **System User** token, so clients
 never log in — their assets just need to be shared with the Outmark agency
 Business Manager (which onboarding already asks for).
 

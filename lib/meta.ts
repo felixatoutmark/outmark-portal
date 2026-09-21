@@ -242,9 +242,11 @@ export async function reelInsights(mediaId: string): Promise<ReelInsights> {
 
 export async function adAccountTotals(
   adAccountId: string, start: string, end: string,
-): Promise<{ spend: number; reach: number; roas: number | null } | null> {
+): Promise<{ spend: number; reach: number; roas: number | null; actions: Record<string, number> } | null> {
   const r = await graphGet<{ data: any[] }>(`act_${adAccountId}/insights`, {
-    fields: "spend,reach,purchase_roas",
+    // Standard events (Lead, Purchase…) come back under `actions`; Contact,
+    // Schedule, SubmitApplication etc. under `conversions`. Names don't collide.
+    fields: "spend,reach,purchase_roas,actions,conversions",
     level: "account",
     time_range: JSON.stringify({ since: start, until: end }),
   });
@@ -255,5 +257,70 @@ export async function adAccountTotals(
     spend: Number(d.spend ?? 0),
     reach: Number(d.reach ?? 0),
     roas: roasRaw != null ? Number(roasRaw) : null,
+    actions: actionMap(d.actions, d.conversions),
   };
+}
+
+// Prototype-less, so a stored type like "constructor" can't resolve to a function.
+function actionMap(...lists: any[]): Record<string, number> {
+  const out: Record<string, number> = Object.create(null);
+  for (const list of lists) {
+    for (const a of Array.isArray(list) ? list : []) {
+      if (a?.action_type) out[String(a.action_type)] = (out[String(a.action_type)] ?? 0) + Number(a.value ?? 0);
+    }
+  }
+  return out;
+}
+
+// ── Lead events ─────────────────────────────────────────────────────────────
+// A "lead" is counted from the ad account's ACTION events, never from a
+// campaign's "results": results are whatever the campaign optimises for, which
+// can be a proxy (e.g. a Contact event on a second page view), not a real lead.
+
+const ACTION_LABELS: Record<string, string> = {
+  lead: "Leads — Meta's standard Lead event (website + on-Facebook forms)",
+  "onsite_conversion.lead_grouped": "On-Facebook leads (instant forms) — already included in “Leads”",
+  "offsite_conversion.fb_pixel_lead": "Website leads (Pixel Lead event) — already included in “Leads”",
+  contact_total: "Contacts (all)",
+  contact_website: "Website contacts (Pixel Contact event)",
+  schedule_total: "Appointments scheduled (all)",
+  schedule_website: "Website appointments scheduled",
+  submit_application_total: "Applications submitted (all)",
+  submit_application_website: "Website applications submitted",
+  complete_registration: "Registrations completed",
+  "offsite_conversion.fb_pixel_complete_registration": "Website registrations completed",
+  subscribe_total: "Subscriptions (all)",
+  start_trial_total: "Trials started (all)",
+  find_location_total: "Location searches (all)",
+  "onsite_conversion.messaging_conversation_started_7d": "Messaging conversations started",
+  "onsite_conversion.messaging_first_reply": "Messaging first replies",
+  "offsite_conversion.fb_pixel_custom": "Website custom pixel events (all)",
+  "offsite_conversion.fb_pixel_purchase": "Website purchases",
+  purchase: "Purchases (all)",
+};
+const LEAD_LIKE = /(^|[._])(lead|contact|schedule|submit_application|complete_registration|subscribe|start_trial|find_location|messaging_conversation_started|messaging_first_reply|custom)([._]|$)/;
+
+export type AdActionEvent = { type: string; label: string; count: number; suggested: boolean };
+
+// Every action type the ad account recorded in the last 90 days, with counts,
+// so the admin can pick what a real lead is for this client.
+export async function listAdActionEvents(adAccountId: string, alwaysInclude: string[] = []): Promise<AdActionEvent[]> {
+  const [ins, customs] = await Promise.all([
+    graphGet<{ data: any[] }>(`act_${adAccountId}/insights`, { fields: "actions,conversions", level: "account", date_preset: "last_90d" }),
+    graphGetAll<any>(`act_${adAccountId}/customconversions`, { fields: "id,name", limit: 100 }).catch(() => []),
+  ]);
+  const counts = actionMap(ins.data?.[0]?.actions, ins.data?.[0]?.conversions);
+  const customName = new Map<string, string>(customs.map((c: any) => [String(c.id), String(c.name ?? c.id)]));
+  for (const t of ["lead", ...alwaysInclude]) if (!(t in counts)) counts[t] = 0;
+  const labelOf = (t: string) => {
+    const m = t.match(/^offsite_conversion\.custom\.(\d+)$/);
+    if (m) return `Custom conversion: ${customName.get(m[1]) ?? m[1]}`;
+    return ACTION_LABELS[t] ?? t;
+  };
+  return Object.entries(counts)
+    .map(([type, count]) => ({ type, label: labelOf(type), count, suggested: LEAD_LIKE.test(type) }))
+    // Meta's standard Lead event first: a high-volume proxy (e.g. a Contact event
+    // fired on a page view) must not sit above it and invite a mis-pick.
+    .sort((a, b) => Number(b.type === "lead") - Number(a.type === "lead")
+      || Number(b.suggested) - Number(a.suggested) || b.count - a.count || a.type.localeCompare(b.type));
 }

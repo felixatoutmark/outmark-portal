@@ -79,6 +79,14 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
 
   const hasMetrics = !!cur;
   const hasPaidSpend = hasMetrics && Number(cur?.paid_spend ?? 0) > 0;
+  // Shown only when there is something to say: leads this month, or a drop to
+  // zero from last month. A client whose ads never fire a Lead event gets no tile
+  // rather than a misleading "Leads 0".
+  const leadsNow = hasMetrics && cur?.leads != null ? Number(cur.leads) : null;
+  const leadsPrev = prev?.leads != null ? Number(prev.leads) : null;
+  const leads = leadsNow != null && (leadsNow > 0 || (leadsPrev ?? 0) > 0) ? leadsNow : null;
+  const money = (n: number) => `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const paidCards = (hasPaidSpend ? 3 : 0) + (leads != null ? 1 : 0) + (hasPaidSpend && (leads ?? 0) > 0 ? 1 : 0);
 
   // Hours computed values
   const hoursDelivered = Number(monthHours?.hours_delivered ?? 0);
@@ -139,11 +147,15 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
             </div>
 
             <SubHeader>Paid ads</SubHeader>
-            {hasPaidSpend ? (
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                <Stat label="Paid reach"  value={cur.paid_reach}  prev={prev?.paid_reach} />
-                <Stat label="Spend"       value={`$${Number(cur.paid_spend).toLocaleString()}`} />
-                <Stat label="ROAS"        value={cur.roas != null ? `${Number(cur.roas).toFixed(1)}x` : "—"} />
+            {paidCards > 0 ? (
+              <div className={`grid grid-cols-2 gap-3 ${paidCards >= 5 ? "md:grid-cols-5" : "md:grid-cols-4"}`}>
+                {hasPaidSpend && <Stat label="Paid reach"  value={cur.paid_reach}  prev={prev?.paid_reach} />}
+                {hasPaidSpend && <Stat label="Spend"       value={`$${Number(cur.paid_spend).toLocaleString()}`} />}
+                {hasPaidSpend && <Stat label="ROAS"        value={cur.roas != null ? `${Number(cur.roas).toFixed(1)}x` : "—"} />}
+                {leads != null && <Stat label="Leads" value={leads} prev={leadsPrev ?? undefined} />}
+                {hasPaidSpend && (leads ?? 0) > 0 && (
+                  <Stat label="Cost per lead" value={money(Number(cur.paid_spend) / leads!)} />
+                )}
               </div>
             ) : (
               <Empty body="No paid spend this month." />

@@ -124,3 +124,37 @@ export function monthStartsBetween(fromStart: string, toStart: string): string[]
   for (let m = toStart; m >= fromStart; m = previousMonthStart(m)) out.push(m);
   return out;
 }
+
+// ── Lead event selection rules ──────────────────────────────────────────────
+// Meta reports the same event under several types (an aggregate and its
+// parts). Summing both would double count, so a child is dropped whenever its
+// aggregate is selected.
+const LEAD_CHILDREN: Record<string, string[]> = {
+  lead: ["onsite_conversion.lead_grouped", "offsite_conversion.fb_pixel_lead", "leadgen_grouped", "onsite_web_lead"],
+  complete_registration: ["offsite_conversion.fb_pixel_complete_registration"],
+};
+
+export function normalizeLeadTypes(input: string[]): { types: string[]; dropped: string[] } {
+  const unique = [...new Set(input.map((t) => t.trim()).filter(Boolean))];
+  const keep = new Set(unique);
+  const dropped: string[] = [];
+  for (const t of unique) {
+    const children = [...(LEAD_CHILDREN[t] ?? [])];
+    const total = t.match(/^(.+)_total$/);
+    if (total) children.push(`${total[1]}_website`, `${total[1]}_mobile_app`, `${total[1]}_offline`);
+    for (const c of children) if (keep.delete(c)) dropped.push(c);
+  }
+  return { types: unique.filter((t) => keep.has(t)), dropped };
+}
+
+// Overlaps we can't resolve automatically (a custom conversion's rule decides
+// whether it matches an event that is also selected).
+export function leadTypeWarnings(types: string[]): string[] {
+  const customs = types.filter((t) => /^offsite_conversion\.custom\./.test(t));
+  const out: string[] = [];
+  if (customs.length && types.length > customs.length) {
+    out.push("A custom conversion is combined with other events — if its rule is built on one of them (e.g. on the Lead event), those leads are counted twice.");
+  }
+  if (customs.length > 1) out.push("Several custom conversions are selected — make sure their rules don't match the same event.");
+  return out;
+}

@@ -20,10 +20,14 @@ import { cacheThumbnail, isCachedUrl, removeCached } from "./thumbnail-cache";
 export type MetaConnection = {
   id: string; client_id: string; ig_user_id: string; ig_username: string | null;
   page_id: string | null; ad_account_id: string | null; sync_enabled: boolean;
+  // Action types that count as a lead for this client. Undefined until
+  // migration 0015 is applied — leads are then simply not synced.
+  lead_action_types?: string[] | null;
 };
 
 export type SyncOptions = {
-  parts?: "all" | "metrics" | "reels";
+  // "paid" = only the ad-account call (paid numbers + leads) — used to recount leads.
+  parts?: "all" | "metrics" | "reels" | "paid";
   forceMetrics?: boolean; // resume sync on a manually-overridden month (replaces manual numbers)
   forceReels?: boolean;   // same, for the month's top-3 reels
 };
@@ -46,8 +50,11 @@ export async function syncClientMonth(
 ): Promise<SyncSummary> {
   const svc = createServiceClient();
   const range = monthRange(monthStart);
-  const doMetrics = opts.parts !== "reels";
-  const doReels = opts.parts !== "metrics";
+  const parts = opts.parts ?? "all";
+  const doIg = parts === "all" || parts === "metrics";
+  const doMetrics = parts !== "reels";
+  const doReels = parts === "all" || parts === "reels";
+  const forceMetrics = !!opts.forceMetrics && parts !== "paid";
   const summary: SyncSummary = {
     client_id: conn.client_id, month: monthStart,
     metrics: doMetrics ? "no-data" : "not-run", paid: "none",
@@ -56,8 +63,8 @@ export async function syncClientMonth(
 
   // Pull everything in parallel; each part degrades independently.
   const [totalsRes, followersRes, adsRes, reelsRes] = await Promise.allSettled([
-    doMetrics ? meta.accountTotals(conn.ig_user_id, range.sinceUnix, range.untilUnix) : Promise.resolve(null),
-    doMetrics ? meta.followersNet(conn.ig_user_id, range.sinceUnix, range.untilUnix) : Promise.resolve(undefined),
+    doIg ? meta.accountTotals(conn.ig_user_id, range.sinceUnix, range.untilUnix) : Promise.resolve(null),
+    doIg ? meta.followersNet(conn.ig_user_id, range.sinceUnix, range.untilUnix) : Promise.resolve(undefined),
     doMetrics && conn.ad_account_id ? meta.adAccountTotals(conn.ad_account_id, range.start, range.end) : Promise.resolve(undefined),
     doReels ? meta.listReelsInWindow(conn.ig_user_id, range.sinceUnix, range.untilUnix) : Promise.resolve([]),
   ]);
@@ -75,6 +82,7 @@ export async function syncClientMonth(
       if (followersRes.value !== undefined) fetched.followers_gained = followersRes.value;
     } else summary.errors.push(`follows_and_unfollows: ${msg(followersRes.reason)}`);
 
+    const leadTypes = Array.isArray(conn.lead_action_types) ? conn.lead_action_types : [];
     // "none" = no ad account · "empty" = Meta answered with no delivery that month.
     let ads: "none" | "data" | "empty" | "error" = "none";
     if (adsRes.status === "fulfilled") {
@@ -82,8 +90,12 @@ export async function syncClientMonth(
         fetched.paid_reach = adsRes.value.reach;
         fetched.paid_spend = adsRes.value.spend;
         fetched.roas = adsRes.value.roas;
+        // Leads = the configured ACTION events. Never the campaign's "results",
+        // which can be a proxy event rather than a real lead.
+        if (leadTypes.length) {
+          fetched.leads = leadTypes.reduce((n, t) => n + (adsRes.value!.actions[t] ?? 0), 0);
+        }
         ads = "data";
-        summary.paid = "written";
       } else if (adsRes.value === null) ads = "empty";
     } else { ads = "error"; summary.paid = "error"; summary.errors.push(`ads: ${msg(adsRes.reason)}`); }
 
@@ -99,12 +111,12 @@ export async function syncClientMonth(
       .order("period_end", { ascending: false });
     const rows = monthRows ?? [];
     const hasManual = rows.some((r) => r.source !== "meta");
-    const takeover = hasManual && !!opts.forceMetrics;
+    const takeover = hasManual && forceMetrics;
 
     if (selErr) {
       summary.metrics = "error";
       summary.errors.push(`dashboard_metrics read: ${selErr.message}`);
-    } else if (hasManual && !opts.forceMetrics) {
+    } else if (hasManual && !forceMetrics) {
       summary.metrics = "kept-manual";
     } else if (!gotData) {
       // Nothing usable from Meta — never create, flip or blank a month on that basis.
@@ -123,6 +135,7 @@ export async function syncClientMonth(
           patch.paid_reach = ads === "empty" ? 0 : null;
           patch.paid_spend = ads === "empty" ? 0 : null;
           patch.roas = null;
+          if (leadTypes.length) patch.leads = ads === "empty" ? 0 : null;
         }
       }
       const canonical = rows.find((r) => r.period_start === range.start && r.period_end === range.end);
@@ -133,7 +146,7 @@ export async function syncClientMonth(
           .eq("id", target.id);
         // Not forced → only ever write a row that is still Meta's (the admin may
         // have overridden it between our read and this write).
-        if (!opts.forceMetrics) q = q.eq("source", "meta");
+        if (!forceMetrics) q = q.eq("source", "meta");
         const { data: updated, error } = await q.select("id");
         if (error) { summary.metrics = "error"; summary.errors.push(`dashboard_metrics: ${error.message}`); }
         else if (!updated?.length) summary.metrics = "kept-manual";
@@ -146,6 +159,7 @@ export async function syncClientMonth(
         if (error) { summary.metrics = "error"; summary.errors.push(`dashboard_metrics: ${error.message}`); }
         else summary.metrics = "written";
       }
+      if (summary.metrics === "written" && ads === "data") summary.paid = "written";
       // Resuming sync = one row per month. Extra rows for the same month would
       // shadow this one or keep pausing the daily sync.
       if (summary.metrics === "written" && takeover && target) {
