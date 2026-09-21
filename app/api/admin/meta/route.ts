@@ -1,12 +1,14 @@
 // Admin endpoint for the Meta integration:
 //   GET  ?action=assets            → IG accounts + ad accounts visible to the Business Manager
 //   POST { action: "save", ... }   → upsert a client's connection
-//   POST { action: "sync", client_id } → run the sync for that client now
+//   POST { action: "sync", client_id } → run the sync for that client now (previous + current month)
+//   POST { action: "sync_month", client_id, month: "YYYY-MM", parts, force } → sync ONE month on demand;
+//        force = resume sync on a manually-overridden month (replaces the manual numbers)
 //   POST { action: "disconnect", client_id }
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase-server";
 import { listBusinessAssets, whoAmI } from "@/lib/meta";
-import { syncClient, type MetaConnection } from "@/lib/meta-sync";
+import { syncClient, syncClientMonth, type MetaConnection } from "@/lib/meta-sync";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -83,8 +85,34 @@ export async function POST(req: NextRequest) {
     const { data: conn } = await supabase.from("meta_connections").select("*").eq("client_id", clientId).maybeSingle();
     if (!conn) return NextResponse.json({ success: false, error: "No Meta connection saved for this client yet" }, { status: 404 });
     try {
-      const summaries = await syncClient(conn as MetaConnection);
+      const summaries = await syncClient(conn as MetaConnection, { backfill: 8, deadline: Date.now() + 40_000 });
       return NextResponse.json({ success: true, summaries });
+    } catch (e: any) {
+      return NextResponse.json({ success: false, error: e?.message ?? String(e) }, { status: 502 });
+    }
+  }
+
+  if (body.action === "sync_month") {
+    const env = envStatus();
+    if (!env.token) return NextResponse.json({ success: false, env, error: "META_SYSTEM_USER_TOKEN is not set" }, { status: 400 });
+    const month = String(body.month ?? "").trim();
+    // +14 h grace: the admin's local month can run ahead of UTC.
+    const keyOf = (d: Date) => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+    const now = new Date();
+    const latest = keyOf(new Date(now.getTime() + 14 * 3600 * 1000));
+    const oldest = keyOf(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 47, 1)));
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return NextResponse.json({ success: false, error: "month must be YYYY-MM" }, { status: 400 });
+    if (month > latest) return NextResponse.json({ success: false, error: "That month hasn't started yet" }, { status: 400 });
+    if (month < oldest) return NextResponse.json({ success: false, error: "That month is too far back" }, { status: 400 });
+    const parts = ["metrics", "reels", "all"].includes(body.parts) ? body.parts : "all";
+    const force = body.force === true;
+    const { data: conn } = await supabase.from("meta_connections").select("*").eq("client_id", clientId).maybeSingle();
+    if (!conn) return NextResponse.json({ success: false, error: "No Meta connection saved for this client yet" }, { status: 404 });
+    try {
+      const summary = await syncClientMonth(conn as MetaConnection, `${month}-01`, {
+        parts, forceMetrics: force && parts !== "reels", forceReels: force && parts !== "metrics",
+      });
+      return NextResponse.json({ success: true, summary });
     } catch (e: any) {
       return NextResponse.json({ success: false, error: e?.message ?? String(e) }, { status: 502 });
     }

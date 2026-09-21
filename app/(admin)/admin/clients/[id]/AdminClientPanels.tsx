@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase-browser";
+import { trackingWindowStart } from "@/lib/meta-util";
 
 const TABS = ["Overview","Metrics","Meta","Content","Goals","Deliverables","Invoices","Requests","Feedback","Settings","Activity"] as const;
 
@@ -92,160 +93,331 @@ function Overview({ client, prefs, filming, progress }: any) {
   );
 }
 
-function Metrics({ client, metrics }: any) {
-  const sb = createClient();
-  const today = new Date();
-  const start = new Date(today.getFullYear(), today.getMonth(), 1).toISOString().slice(0,10);
-  const end   = new Date(today.getFullYear(), today.getMonth()+1, 0).toISOString().slice(0,10);
+// ── Metrics tab: one row per calendar month ─────────────────────────────────
+// A month is from META (source = 'meta' — "Live" while the daily sync still
+// refreshes it, i.e. current + previous month; final once it's closed), a
+// MANUAL OVERRIDE (any hand-entered row → sync paused for that month, your
+// numbers are the truth) or empty. Profile visits / website clicks are never
+// provided by Meta, so they stay hand-editable even on a Meta month.
+const METRIC_FIELDS: { key: string; label: string; step?: string; fromMeta: boolean; paid?: boolean }[] = [
+  { key: "organic_reach",    label: "Organic reach",    fromMeta: true },
+  { key: "paid_reach",       label: "Paid reach",       fromMeta: true, paid: true },
+  { key: "profile_visits",   label: "Profile visits",   fromMeta: false },
+  { key: "website_clicks",   label: "Website clicks",   fromMeta: false },
+  { key: "paid_spend",       label: "Paid spend ($)", step: "0.01", fromMeta: true, paid: true },
+  { key: "roas",             label: "ROAS (x)", step: "0.01", fromMeta: true, paid: true },
+  { key: "followers_gained", label: "Followers gained", fromMeta: true },
+];
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    const f = new FormData(e.currentTarget as HTMLFormElement);
-    const obj: any = Object.fromEntries(f.entries());
-    for (const k of ["organic_reach","paid_reach","profile_visits","website_clicks","followers_gained"]) {
-      obj[k] = obj[k] === "" ? null : Number(obj[k]);
-    }
-    obj.paid_spend = obj.paid_spend === "" ? null : Number(obj.paid_spend);
-    obj.roas       = obj.roas === ""       ? null : Number(obj.roas);
-    obj.client_id = client.id;
-    obj.source = "manual"; // hand-entered → the Meta sync must not overwrite it
-    let { error } = await sb.from("dashboard_metrics").upsert(obj, { onConflict: "client_id,period_start,period_end" });
-    if (error && /source/.test(error.message)) {
-      // DB predates migration 0014 — save without the provenance flag rather than lose the numbers.
-      delete obj.source;
-      ({ error } = await sb.from("dashboard_metrics").upsert(obj, { onConflict: "client_id,period_start,period_end" }));
-    }
-    if (error) { alert(`Save failed: ${error.message}`); return; }
-    location.reload();
-  }
+const pad2 = (n: number) => String(n).padStart(2, "0");
+// UTC, so the month list agrees with the API and the daily cron.
+const utcMonthKey = (d = new Date()) => `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}`;
+function shiftMonthKey(key: string, delta: number) {
+  const [y, m] = key.split("-").map(Number);
+  return utcMonthKey(new Date(Date.UTC(y, m - 1 + delta, 1)));
+}
+function monthBounds(key: string) {
+  const [y, m] = key.split("-").map(Number);
+  return { start: `${key}-01`, end: `${key}-${pad2(new Date(Date.UTC(y, m, 0)).getUTCDate())}` };
+}
+function monthLabelOf(key: string) {
+  const [y, m] = key.split("-").map(Number);
+  return { month: new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-US", { month: "long", timeZone: "UTC" }), year: String(y) };
+}
+
+function Metrics({ client, metrics, metaConn }: any) {
+  const connected = !!metaConn;
+  const nowKey = utcMonthKey();
+  const [earlier, setEarlier] = useState(0);
+
+  // Same window the daily backfill uses; "Show earlier months" extends it.
+  const dataMonths = (metrics ?? []).map((r: any) => String(r.period_end).slice(0, 7)).sort();
+  const floor = shiftMonthKey(nowKey, -47);
+  let from = shiftMonthKey(trackingWindowStart(client.created_at, dataMonths[0] ?? null, `${nowKey}-01`).slice(0, 7), -earlier);
+  if (from < floor) from = floor;
+  const keys: string[] = [];
+  for (let k = nowKey; k >= from; k = shiftMonthKey(k, -1)) keys.push(k);
+  const hiddenOlder = dataMonths.length > 0 && dataMonths[0] < from;
+
+  const last = metaConn?.last_synced_at ? new Date(metaConn.last_synced_at) : null;
+  const stale = connected && metaConn.sync_enabled && (!last || Date.now() - last.getTime() > 36 * 3600 * 1000);
+  const trouble = connected && (!!metaConn.last_sync_error || stale);
+
   return (
     <div className="space-y-4">
-      <form onSubmit={submit} className="card p-5 space-y-3">
-        <h3 className="font-bold">Add / update period metrics</h3>
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-          <Inp name="period_start" label="Period start" type="date" defaultValue={start} required />
-          <Inp name="period_end"   label="Period end"   type="date" defaultValue={end} required />
-          <Inp name="organic_reach"    label="Organic reach"    type="number" />
-          <Inp name="paid_reach"       label="Paid reach"       type="number" />
-          <Inp name="profile_visits"   label="Profile visits"   type="number" />
-          <Inp name="website_clicks"   label="Website clicks"   type="number" />
-          <Inp name="followers_gained" label="Followers gained" type="number" />
-          <Inp name="paid_spend"       label="Paid spend ($)"   type="number" step="0.01" />
-          <Inp name="roas"             label="ROAS (x)"         type="number" step="0.01" />
+      <div className="card p-4 text-[13px] flex items-start gap-3">
+        <span className={`mt-1 w-2 h-2 rounded-full shrink-0 ${
+          !connected || !metaConn.sync_enabled ? "bg-[--subtle]" : trouble ? "bg-amber-500" : "bg-green-600"}`} />
+        <div className="text-[--muted]">
+          {connected ? (
+            <>
+              <b className="text-[--fg]">Meta connected{metaConn.ig_username ? ` · @${metaConn.ig_username}` : ""}.</b>{" "}
+              {metaConn.sync_enabled
+                ? "The current and previous month refresh from Meta every day, and empty earlier months fill in automatically a couple per day. Closed months are final."
+                : "Daily auto-sync is switched off for this client (Meta tab) — use a month's Sync button to pull it on demand."}{" "}
+              Override a month manually and its sync pauses — your numbers are the truth until you resume it.
+              Profile visits and website clicks aren't available from Meta, so you can always fill those in by hand.
+              <div className={`mt-1 text-[12px] ${trouble ? "text-amber-700" : "text-[--subtle]"}`}>
+                Last full sync: {last ? last.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "never"}
+                {stale && " — nothing in the last 36 hours, check the Meta tab."}
+                {!stale && metaConn.last_sync_error && " — finished with warnings, see the Meta tab."}
+              </div>
+            </>
+          ) : (
+            <>
+              <b className="text-[--fg]">Meta not connected</b> — every month is entered by hand. Connect the
+              client's Instagram in the <b>Meta</b> tab to sync months automatically.
+            </>
+          )}
         </div>
-        <button className="btn-primary">Save metrics</button>
-      </form>
-      <div className="card overflow-hidden">
+      </div>
+
+      <div className="card overflow-x-auto">
         <table className="w-full text-[13px]">
           <thead className="bg-[--warm]"><tr>
-            <Th>Period</Th><Th>Organic</Th><Th>Paid</Th><Th>Visits</Th><Th>Clicks</Th><Th>Spend</Th><Th>ROAS</Th><Th>Followers</Th><Th></Th>
+            <Th>Month</Th><Th>Status</Th><Th>Organic</Th><Th>Paid</Th><Th>Visits</Th><Th>Clicks</Th><Th>Spend</Th><Th>ROAS</Th><Th>Followers</Th><Th></Th>
           </tr></thead>
           <tbody>
-            {metrics.map((m: any) => <MetricRow key={m.id} m={m} />)}
-            {!metrics.length && <tr><td colSpan={9} className="p-4 text-center text-[--muted]">No metrics yet.</td></tr>}
+            {keys.map((k) => {
+              const monthRows = (metrics ?? []).filter((r: any) => String(r.period_end).startsWith(k));
+              const stamp = monthRows.map((r: any) => `${r.id}:${r.updated_at}`).join("|");
+              return (
+                <MonthRow key={`${k}-${stamp}`} client={client} monthKey={k} nowKey={nowKey}
+                  monthRows={monthRows} metaConn={metaConn ?? null} />
+              );
+            })}
           </tbody>
         </table>
       </div>
+      <button className="btn-ghost text-[12px]" onClick={() => setEarlier((n) => n + 6)} disabled={from <= floor}>
+        Show earlier months{hiddenOlder ? " (there is older data)" : ""}
+      </button>
     </div>
   );
 }
 
-// Order matches the table header: Organic, Paid, Visits, Clicks, Spend, ROAS, Followers.
-const METRIC_FIELDS: { key: string; label: string; step?: string }[] = [
-  { key: "organic_reach",    label: "Organic reach" },
-  { key: "paid_reach",       label: "Paid reach" },
-  { key: "profile_visits",   label: "Profile visits" },
-  { key: "website_clicks",   label: "Website clicks" },
-  { key: "paid_spend",       label: "Paid spend ($)", step: "0.01" },
-  { key: "roas",             label: "ROAS (x)", step: "0.01" },
-  { key: "followers_gained", label: "Followers gained" },
-];
-
-function MetricRow({ m }: { m: any }) {
+function MonthRow({ client, monthKey, nowKey, monthRows, metaConn }: any) {
   const sb = createClient();
+  const connected = !!metaConn;
+  const hasAdAccount = !!metaConn?.ad_account_id;
+  const b = monthBounds(monthKey);
+  // Same pick as the client dashboard: the full-month row if there is one, else
+  // the latest period_end (rows arrive sorted that way).
+  const row = monthRows.find((r: any) => r.period_start === b.start && r.period_end === b.end) ?? monthRows[0] ?? null;
+  // Any hand-entered row pauses the month's sync, so that is what "manual" means here too.
+  const status: "meta" | "manual" | "empty" =
+    !row ? "empty" : monthRows.some((r: any) => r.source !== "meta") ? "manual" : "meta";
+  // Only the current + previous month are refreshed by the daily sync.
+  const auto = connected && metaConn.sync_enabled && monthKey >= shiftMonthKey(nowKey, -1);
+
+  const initialVals = () =>
+    Object.fromEntries(METRIC_FIELDS.map((f) => [f.key, row?.[f.key] == null ? "" : String(row[f.key])]));
   const [editing, setEditing] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [periodStart, setPeriodStart] = useState<string>(m.period_start);
-  const [periodEnd, setPeriodEnd] = useState<string>(m.period_end);
-  const [vals, setVals] = useState<Record<string, string>>(
-    Object.fromEntries(METRIC_FIELDS.map((f) => [f.key, m[f.key] == null ? "" : String(m[f.key])])),
-  );
+  const [override, setOverrideState] = useState(false); // Meta month: unlock the Meta-provided fields
+  const [busy, setBusy] = useState<null | "save" | "sync" | "delete">(null);
+  const [vals, setVals] = useState<Record<string, string>>(initialVals);
+  const { month, year } = monthLabelOf(monthKey);
+  const label = `${month} ${year}`;
+
+  // While connected, Meta owns these fields on a Meta month (paid ones only with an ad account).
+  const metaOwned = (f: (typeof METRIC_FIELDS)[number]) => connected && f.fromMeta && (!f.paid || hasAdAccount);
+  const locked = (f: (typeof METRIC_FIELDS)[number]) => status === "meta" && !override && metaOwned(f);
+  function setOverride(on: boolean) {
+    setOverrideState(on);
+    if (!on) setVals(initialVals()); // drop abandoned edits to Meta's numbers
+  }
+  function openEdit() { setVals(initialVals()); setOverrideState(false); setEditing(true); }
+  function cancelEdit() { setVals(initialVals()); setOverrideState(false); setEditing(false); }
+
+  async function syncFromMeta(force: boolean) {
+    if (force && !window.confirm(
+      `Resume Meta sync for ${label}?\n\nYour manual numbers for this month are replaced with Meta's ` +
+      `(profile visits and website clicks are kept).` +
+      (auto ? " The month then keeps updating every day." : " It's a closed month, so Meta's numbers are final."))) return;
+    setBusy("sync");
+    try {
+      const res = await fetch("/api/admin/meta", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "sync_month", client_id: client.id, month: monthKey, parts: "metrics", force }),
+      });
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j?.success) throw new Error(j?.error ?? `HTTP ${res.status}`);
+      const s = j.summary;
+      if (s.metrics !== "written") {
+        const why =
+          s.metrics === "no-data" ? `Meta returned no data for ${label} — it may be older than Meta keeps, or the account had no activity.`
+          : s.metrics === "kept-manual" ? `${label} is manually overridden.`
+          : `Meta reported a problem:\n${(s.errors ?? []).slice(0, 4).join("\n")}`;
+        alert(`${why}\n\nNothing was changed.`);
+        return;
+      }
+      if (s.errors?.length) alert(`Synced ${label}, with warnings:\n${s.errors.slice(0, 4).join("\n")}`);
+      location.reload();
+    } catch (err: any) {
+      alert(`Sync failed: ${err.message}`);
+    } finally { setBusy(null); }
+  }
 
   async function save() {
-    setBusy(true);
+    // A Meta month stays Meta's unless the admin explicitly overrides it.
+    const manualSave = status !== "meta" || override || !connected;
+    if (status === "meta" && connected && override && !window.confirm(
+      `Override ${label} manually?\n\nMeta sync pauses for this month and your numbers become the truth until you resume sync.`)) return;
+    setBusy("save");
     try {
-      const patch: any = { period_start: periodStart, period_end: periodEnd };
-      for (const f of METRIC_FIELDS) patch[f.key] = vals[f.key] === "" ? null : Number(vals[f.key]);
-      let { error } = await sb.from("dashboard_metrics").update({ ...patch, source: "manual" }).eq("id", m.id);
-      if (error && /source/.test(error.message)) {
-        ({ error } = await sb.from("dashboard_metrics").update(patch).eq("id", m.id));
+      const patch: any = { period_start: b.start, period_end: b.end };
+      for (const f of METRIC_FIELDS) {
+        if (manualSave || !metaOwned(f)) patch[f.key] = vals[f.key] === "" ? null : Number(vals[f.key]);
       }
-      if (error) throw error;
+      if (manualSave) patch.source = "manual";
+      if (row) {
+        const { data, error } = await sb.from("dashboard_metrics").update(patch).eq("id", row.id).select("id");
+        if (error) throw error;
+        if (!data?.length) throw new Error("This month changed since the page loaded — reload and try again.");
+      } else {
+        // Upsert: if the daily sync created the month meanwhile, the manual entry still wins.
+        const { error } = await sb.from("dashboard_metrics")
+          .upsert({ client_id: client.id, ...patch }, { onConflict: "client_id,period_start,period_end" });
+        if (error) throw error;
+      }
+      // One row per month: older partial-period rows would shadow this one.
+      const extras = monthRows.filter((r: any) => r.id !== row?.id).map((r: any) => r.id);
+      if (manualSave && row && extras.length) await sb.from("dashboard_metrics").delete().in("id", extras);
       location.reload();
     } catch (err: any) {
-      alert(err.message ?? "Save failed");
-    } finally { setBusy(false); }
+      alert(`Save failed: ${err.message ?? err}`);
+    } finally { setBusy(null); }
   }
 
-  async function remove() {
-    if (!window.confirm("Delete this metrics row?")) return;
-    setBusy(true);
+  async function clearMonth() {
+    if (!row || !window.confirm(`Clear all numbers for ${label}?` +
+      (connected ? "\n\nThe month goes back to empty — sync it from Meta again whenever you like." : ""))) return;
+    setBusy("delete");
     try {
-      const { error } = await sb.from("dashboard_metrics").delete().eq("id", m.id);
+      const { error } = await sb.from("dashboard_metrics").delete().in("id", monthRows.map((r: any) => r.id));
       if (error) throw error;
       location.reload();
     } catch (err: any) {
-      alert(err.message ?? "Delete failed");
-    } finally { setBusy(false); }
+      alert(`Delete failed: ${err.message ?? err}`);
+    } finally { setBusy(null); }
   }
+
+  const fmt = (f: (typeof METRIC_FIELDS)[number]) => {
+    const v = row?.[f.key];
+    if (v == null) return "—";
+    if (f.key === "paid_spend") return `$${Number(v).toLocaleString("en-US")}`;
+    if (f.key === "roas") return `${v}x`;
+    return Number(v).toLocaleString("en-US");
+  };
+  const updated = row?.updated_at
+    ? new Date(row.updated_at).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : null;
+
+  const monthCell = (
+    <Td className="whitespace-nowrap">
+      <span className="font-semibold">{month}</span> <span className="text-[--subtle] text-[11px]">{year}</span>
+    </Td>
+  );
+  const badge = (dot: string, text: string, tone: string, sub?: string | null) => (
+    <div>
+      <span className={`inline-flex items-center gap-1.5 font-medium ${tone}`}>
+        <span className={`w-1.5 h-1.5 rounded-full ${dot}`} />{text}
+      </span>
+      {sub && <div className="text-[11px] text-[--subtle]">{sub}</div>}
+    </div>
+  );
+  const statusCell = (
+    <Td className="whitespace-nowrap">
+      {status === "meta" && auto && badge("bg-green-600", "Live · Meta", "text-green-700", updated && `updated ${updated}`)}
+      {status === "meta" && !auto && connected && metaConn.sync_enabled &&
+        badge("bg-sky-600", "From Meta · final", "text-sky-700", "closed month")}
+      {status === "meta" && !auto && !(connected && metaConn.sync_enabled) &&
+        badge("bg-[--subtle]", "From Meta", "text-[--muted]", connected ? "auto-sync is off" : "Meta disconnected")}
+      {status === "manual" && badge("bg-amber-500", "Manual override", "text-amber-700", connected ? "sync paused" : null)}
+      {status === "empty" && <span className="text-[--subtle]">No data</span>}
+    </Td>
+  );
 
   if (!editing) {
     return (
       <tr className="border-t border-[--border]">
-        <Td>{m.period_start} → {m.period_end}</Td>
-        <Td>{m.organic_reach?.toLocaleString("en-US") ?? "—"}</Td>
-        <Td>{m.paid_reach?.toLocaleString("en-US") ?? "—"}</Td>
-        <Td>{m.profile_visits?.toLocaleString("en-US") ?? "—"}</Td>
-        <Td>{m.website_clicks?.toLocaleString("en-US") ?? "—"}</Td>
-        <Td>{m.paid_spend != null ? `$${m.paid_spend}` : "—"}</Td>
-        <Td>{m.roas != null ? `${m.roas}x` : "—"}</Td>
-        <Td>{m.followers_gained?.toLocaleString("en-US") ?? "—"}</Td>
+        {monthCell}
+        {statusCell}
+        {METRIC_FIELDS.map((f) => <Td key={f.key}>{fmt(f)}</Td>)}
         <Td className="text-right whitespace-nowrap">
-          <button className="btn-ghost !py-1 !text-[11px]" onClick={() => setEditing(true)}>Edit</button>
-          <button
-            disabled={busy}
-            onClick={remove}
-            className="ml-1 text-[11px] px-2 py-1 rounded-pill border border-red-200 text-red-700 hover:bg-red-50"
-          >Delete</button>
+          {connected && status === "meta" && (
+            <button disabled={busy !== null} className="btn-ghost !py-1 !text-[11px]" onClick={() => syncFromMeta(false)}>
+              {busy === "sync" ? "Syncing…" : "Sync now"}
+            </button>
+          )}
+          {connected && status === "empty" && (
+            <button disabled={busy !== null} className="btn-primary !py-1 !text-[11px]" onClick={() => syncFromMeta(false)}>
+              {busy === "sync" ? "Syncing…" : "Sync from Meta"}
+            </button>
+          )}
+          {connected && status === "manual" && (
+            <button disabled={busy !== null} className="btn-ghost !py-1 !text-[11px]" onClick={() => syncFromMeta(true)}>
+              {busy === "sync" ? "Syncing…" : "Resume sync"}
+            </button>
+          )}
+          <button disabled={busy !== null} className="btn-ghost !py-1 !text-[11px] ml-1" onClick={openEdit}>
+            {status === "empty" ? "Enter manually" : "Edit"}
+          </button>
         </Td>
       </tr>
     );
   }
 
   return (
-    <tr className="border-t border-[--border] bg-[--warm]/50 align-top">
-      <Td>
-        <div className="flex flex-col gap-1">
-          <input type="date" className="input !py-1 !text-[12px]" value={periodStart} onChange={(e) => setPeriodStart(e.target.value)} />
-          <input type="date" className="input !py-1 !text-[12px]" value={periodEnd} onChange={(e) => setPeriodEnd(e.target.value)} />
-        </div>
-      </Td>
-      {METRIC_FIELDS.map((f) => (
-        <Td key={f.key}>
-          <input
-            type="number"
-            step={f.step ?? "1"}
-            className="input !py-1 !text-[12px] !w-20"
-            value={vals[f.key]}
-            onChange={(e) => setVals((v) => ({ ...v, [f.key]: e.target.value }))}
-          />
+    <>
+      <tr className="border-t border-[--border] bg-[--warm]/50 align-top">
+        {monthCell}
+        {statusCell}
+        {METRIC_FIELDS.map((f) => (
+          <Td key={f.key}>
+            <input
+              type="number"
+              step={f.step ?? "1"}
+              disabled={locked(f)}
+              title={locked(f) ? "Provided by Meta — tick “Override Meta numbers” to edit" : undefined}
+              className="input !py-1 !text-[12px] !w-20 disabled:opacity-50 disabled:cursor-not-allowed"
+              value={vals[f.key]}
+              onChange={(e) => setVals((v) => ({ ...v, [f.key]: e.target.value }))}
+            />
+          </Td>
+        ))}
+        <Td className="text-right whitespace-nowrap">
+          <button disabled={busy !== null} className="btn-primary !py-1 !text-[11px]" onClick={save}>{busy === "save" ? "…" : "Save"}</button>
+          <button disabled={busy !== null} className="btn-ghost !py-1 !text-[11px] ml-1" onClick={cancelEdit}>Cancel</button>
         </Td>
-      ))}
-      <Td className="text-right whitespace-nowrap">
-        <button disabled={busy} className="btn-primary !py-1 !text-[11px]" onClick={save}>{busy ? "…" : "Save"}</button>
-        <button disabled={busy} className="btn-ghost !py-1 !text-[11px] ml-1" onClick={() => setEditing(false)}>Cancel</button>
-      </Td>
-    </tr>
+      </tr>
+      <tr className="bg-[--warm]/50">
+        <td colSpan={10} className="px-3 pb-3 text-[12px] text-[--muted]">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            {status === "meta" && connected ? (
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={override} onChange={(e) => setOverride(e.target.checked)} />
+                <span>
+                  <b className="text-[--fg]">Override Meta numbers</b> — pauses sync for {label}; your numbers become the truth.
+                  Unticked, you're only editing the fields Meta doesn't provide and the month stays Meta's.
+                </span>
+              </label>
+            ) : status === "meta" ? (
+              <span>Meta isn't connected any more — saving turns {label} into a manual month.</span>
+            ) : status === "manual" ? (
+              <span>Manual override{connected ? " — Meta sync is paused for this month. Use “Resume sync” to hand it back to Meta." : "."}</span>
+            ) : (
+              <span>Entering {label} by hand{connected ? " marks it as a manual override — Meta sync won't touch it." : "."}</span>
+            )}
+            {row && (
+              <button disabled={busy !== null} onClick={clearMonth}
+                className="text-[11px] px-2 py-1 rounded-pill border border-red-200 text-red-700 hover:bg-red-50">
+                {busy === "delete" ? "…" : "Clear month"}
+              </button>
+            )}
+          </div>
+        </td>
+      </tr>
+    </>
   );
 }
 
@@ -254,7 +426,7 @@ const AD_EXT_BY_TYPE: Record<string, string> = {
   "video/mp4": "mp4", "video/quicktime": "mov", "video/webm": "webm",
 };
 
-function WinningReels({ client, winning, topAds }: any) {
+function WinningReels({ client, winning, topAds, metaConn }: any) {
   const now = new Date();
   const defaultMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
   const [month, setMonthState] = useState(defaultMonth);
@@ -271,6 +443,7 @@ function WinningReels({ client, winning, topAds }: any) {
   const monthValid = /^\d{4}-\d{2}$/.test(month);
   const [busy, setBusy] = useState<number | null>(null);
   const [adBusy, setAdBusy] = useState(false);
+  const [reelSync, setReelSync] = useState(false);
   const sb = createClient();
   const rows = monthValid ? (winning ?? []).filter((w: any) => String(w.month).startsWith(month)) : [];
   const rowFor = (pos: number) => rows.find((w: any) => w.position === pos);
@@ -335,6 +508,35 @@ function WinningReels({ client, winning, topAds }: any) {
     } finally {
       setBusy(null);
     }
+  }
+
+  // Reels for the month are LIVE (all rows from Meta), MANUAL (any hand-picked
+  // row → sync paused for the month) or empty.
+  const reelsStatus: "live" | "manual" | "empty" =
+    !rows.length ? "empty" : rows.every((w: any) => w.source === "meta") ? "live" : "manual";
+  // The daily sync only refreshes the current + previous month.
+  const reelsAuto = !!metaConn?.sync_enabled && monthValid && month >= shiftMonthKey(utcMonthKey(), -1);
+
+  async function syncReels(force: boolean) {
+    if (force && !confirm(`Resume Meta sync for ${month}?\n\nYour hand-picked reels for this month are replaced with Meta's top 3 by views, and the month goes back to updating automatically.`)) return;
+    setReelSync(true);
+    try {
+      const res = await fetch("/api/admin/meta", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "sync_month", client_id: client.id, month, parts: "reels", force }),
+      });
+      const j = await res.json().catch(() => null);
+      if (!res.ok || !j?.success) throw new Error(j?.error ?? `HTTP ${res.status}`);
+      const s = j.summary;
+      if (typeof s.reels !== "number") {
+        alert(`Reels weren't updated (${s.reels}).\n${(s.errors ?? []).slice(0, 4).join("\n")}`);
+        return;
+      }
+      if (s.reels === 0) { alert(`Meta found no reels posted in ${month}.`); return; }
+      location.reload();
+    } catch (err: any) {
+      alert(`Sync failed: ${err.message}`);
+    } finally { setReelSync(false); }
   }
 
   // Top-performing-ad upload goes browser → storage directly: Vercel API
@@ -452,6 +654,29 @@ function WinningReels({ client, winning, topAds }: any) {
         </div>
       )}
 
+      {metaConn && monthValid && (
+        <div className="flex items-center justify-between gap-3 flex-wrap text-[12px] border border-[--border] rounded-lg px-3 py-2">
+          {reelsStatus === "live" && (
+            <span className="inline-flex items-center gap-1.5 text-green-700 font-medium">
+              <span className={`w-1.5 h-1.5 rounded-full ${reelsAuto ? "bg-green-600" : "bg-sky-600"}`} />
+              {reelsAuto ? "Live · top 3 by views from Meta, refreshed daily"
+                : metaConn.sync_enabled ? "From Meta · top 3 by views — closed month, press Sync now to re-rank"
+                : "From Meta · top 3 by views — auto-sync is off"}
+            </span>
+          )}
+          {reelsStatus === "manual" && (
+            <span className="inline-flex items-center gap-1.5 text-amber-700 font-medium">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />Manual picks — Meta sync is paused for this month
+            </span>
+          )}
+          {reelsStatus === "empty" && <span className="text-[--muted]">No reels for this month yet.</span>}
+          <button type="button" className="btn-ghost !py-1 !text-[11px]" disabled={reelSync || adBusy || busy !== null}
+            onClick={() => syncReels(reelsStatus === "manual")}>
+            {reelSync ? "Syncing…" : reelsStatus === "manual" ? "Resume sync" : reelsStatus === "live" ? "Sync now" : "Sync from Meta"}
+          </button>
+        </div>
+      )}
+
       {[1, 2, 3].map((pos) => {
         const row = rowFor(pos);
         return (
@@ -480,7 +705,7 @@ function WinningReels({ client, winning, topAds }: any) {
                 <Inp name="thumbnail_file" label="Or upload an image (optional)" type="file" accept="image/*" />
               </div>
               <div className="flex gap-2">
-                <button className="btn-primary text-[13px]" disabled={busy === pos || !monthValid || adBusy}>
+                <button className="btn-primary text-[13px]" disabled={busy === pos || !monthValid || adBusy || reelSync}>
                   {busy === pos ? "Saving…" : row ? "Update" : "Save"}
                 </button>
                 {row && (
@@ -535,7 +760,7 @@ function WinningReels({ client, winning, topAds }: any) {
   );
 }
 
-function Content({ client, prefs, progress, winning, topAds }: any) {
+function Content({ client, prefs, progress, winning, topAds, metaConn }: any) {
   // Pull onboarding blobs for content-related steps. Content prefs (5),
   // talent (6), and approval workflow (8) all feed creative direction.
   const stepData = (n: number) => (progress ?? []).find((r: any) => r.step_number === n)?.data ?? {};
@@ -557,7 +782,7 @@ function Content({ client, prefs, progress, winning, topAds }: any) {
   }
   return (
     <div className="space-y-4">
-      <WinningReels client={client} winning={winning} topAds={topAds} />
+      <WinningReels client={client} winning={winning} topAds={topAds} metaConn={metaConn} />
 
       <form onSubmit={saveUploadUrl} className="card p-5 space-y-3">
         <h3 className="font-bold">Content upload link</h3>
@@ -1490,7 +1715,7 @@ function MetaPanel({ client, metaConn }: any) {
           <li><b className="text-[--fg]">Metrics tab</b> — organic reach and followers gained (net follows − unfollows); plus paid reach / spend / ROAS when an ad account is set. One row per calendar month; each run refreshes the current and previous month.</li>
           <li><b className="text-[--fg]">Top 3 winning reels</b> — the month's reels ranked by views, thumbnails cached.</li>
           <li><b className="text-[--fg]">Still manual:</b> profile visits and website clicks — Meta removed those from the API in 2025 — plus hours, goals, deliverables and the top ad.</li>
-          <li>Anything you edit by hand is marked <i>manual</i>; the sync never touches a month that has a manual row.</li>
+          <li><b className="text-[--fg]">Live vs. manual, per month:</b> in the Metrics tab every month is either from Meta or a <i>Manual override</i> (sync paused, your numbers are the truth). “Resume sync” hands a month back to Meta. The daily run refreshes the current and previous month (<i>Live</i>) and fills in empty earlier months a couple per day; closed months are final, and top-3 reels for older months are pulled on demand in the Content tab.</li>
           <li>Numbers can differ slightly from the Instagram app — Meta's API and its app compute a few metrics differently.</li>
         </ul>
       </Card>

@@ -148,8 +148,12 @@ One-time setup:
    → **Connect** → **Sync now**.
 
 `vercel.json` schedules `/api/cron/meta-sync` daily at 10:00 UTC (current +
-previous month per client). Rows the sync writes carry `source = 'meta'`;
-anything saved by hand becomes `'manual'` and is never overwritten.
+previous month per client). Every month is either **live** (`source = 'meta'`,
+refreshed by the cron) or a **manual override** (`source = 'manual'`): the
+sync never touches an overridden month until the admin presses "Resume sync"
+in the Metrics tab (or the reels card), which replaces the manual numbers with
+Meta's. Each run also back-fills a couple of empty earlier months (metrics
+only); closed months are final, and their top-3 reels are pulled on demand.
 
 ## Backups
 

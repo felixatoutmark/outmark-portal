@@ -96,3 +96,31 @@ export async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (t
   }));
   return out;
 }
+
+// First month the portal tracks for a client: the earliest of its creation
+// month, its first data month, and `minBack` months ago — never more than
+// `maxBack` months back (Meta's insights don't reach further anyway).
+// All arguments/returns are "YYYY-MM-01" strings; nulls are ignored.
+export function trackingWindowStart(
+  createdAt: string | null | undefined, earliestDataMonth: string | null | undefined,
+  currentStart: string, minBack = 5, maxBack = 23,
+): string {
+  const shift = (start: string, delta: number) => {
+    const [y, m] = start.split("-").map(Number);
+    const d = new Date(Date.UTC(y, m - 1 + delta, 1));
+    return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-01`;
+  };
+  const candidates = [shift(currentStart, -minBack)];
+  if (createdAt) candidates.push(`${String(createdAt).slice(0, 7)}-01`);
+  if (earliestDataMonth) candidates.push(`${String(earliestDataMonth).slice(0, 7)}-01`);
+  const earliest = candidates.sort()[0];
+  const floor = shift(currentStart, -maxBack);
+  return earliest < floor ? floor : earliest;
+}
+
+// Month starts from `fromStart` through `toStart` inclusive, newest first.
+export function monthStartsBetween(fromStart: string, toStart: string): string[] {
+  const out: string[] = [];
+  for (let m = toStart; m >= fromStart; m = previousMonthStart(m)) out.push(m);
+  return out;
+}
