@@ -38,7 +38,11 @@ async function fetchJson(url: string): Promise<any> {
     if (!res.ok || json?.error) {
       const e = json?.error ?? {};
       // Graph error messages never include the request URL, so the token can't leak here.
-      throw new GraphError(e.message ?? `Graph API HTTP ${res.status}`, {
+      // Code + subcode are what Meta's docs and support key on, so surface them.
+      const tag = [e.code != null ? `code ${e.code}` : "", e.error_subcode != null ? `subcode ${e.error_subcode}` : ""]
+        .filter(Boolean).join(", ");
+      const detail = e.error_user_msg ? ` — ${e.error_user_msg}` : "";
+      throw new GraphError(`${e.message ?? `Graph API HTTP ${res.status}`}${tag ? ` (${tag})` : ""}${detail}`, {
         code: e.code, subcode: e.error_subcode, type: e.type,
       });
     }
