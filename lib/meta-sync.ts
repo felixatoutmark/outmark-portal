@@ -41,7 +41,9 @@ export type SyncSummary = {
   errors: string[];
 };
 
-const MAX_REELS_PER_MONTH = 60;
+// High enough for a client posting several reels a day; the oldest reels of the
+// month have had the most time to collect views, so they must not be cut off.
+const MAX_REELS_PER_MONTH = 150;
 const INSIGHTS_CONCURRENCY = 6;
 const msg = (e: any) => e?.message ?? String(e);
 

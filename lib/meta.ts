@@ -155,6 +155,12 @@ async function totalValue(
     const tv = r.data?.[0]?.total_value;
     return tv && tv.value != null ? { value: Number(tv.value), raw: tv } : { value: undefined, raw: tv };
   };
+  // Never ask for time that hasn't happened yet: Meta rejects a future `since`
+  // ("since param is not valid"), which the 30-day split of an in-progress
+  // 31-day month would otherwise produce (e.g. an Oct 31 chunk on Oct 5).
+  const nowUnix = Math.floor(Date.now() / 1000);
+  if (sinceUnix > nowUnix) return { value: undefined, raw: undefined };
+  untilUnix = Math.min(untilUnix, nowUnix);
   try {
     return await read(sinceUnix, untilUnix);
   } catch (e) {
@@ -217,6 +223,9 @@ const MEDIA_FIELDS = "id,caption,media_type,media_product_type,permalink,thumbna
 // timestamp `stop` is a belt-and-braces guard. Falls back to plain paging if
 // Graph rejects the time params.
 export async function listReelsInWindow(igUserId: string, sinceUnix: number, untilUnix: number): Promise<MediaItem[]> {
+  const nowUnix = Math.floor(Date.now() / 1000);
+  if (sinceUnix > nowUnix) return [];
+  untilUnix = Math.min(untilUnix, nowUnix);
   const opts = { maxPages: 10, stop: (m: MediaItem) => Date.parse(m.timestamp) / 1000 < sinceUnix };
   let items: MediaItem[];
   try {
