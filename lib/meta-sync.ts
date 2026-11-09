@@ -103,6 +103,10 @@ export async function syncClientMonth(
 
     // An empty ads answer alone is not "data" — it must never create or flip a month.
     const gotData = fetched.organic_reach !== undefined || fetched.followers_gained !== undefined || ads === "data";
+    // Meta answers "reach 0" for months with no activity at all (e.g. before the
+    // account existed). That is not worth a row: it would show the client a month
+    // of zeros instead of "nothing logged yet".
+    const hasSignal = (fetched.organic_reach ?? 0) > 0 || (fetched.followers_gained ?? 0) !== 0 || ads === "data";
 
     // The client dashboard shows "the row whose period_end falls in the month"
     // (latest first), so that is also the predicate for "this month's rows".
@@ -120,7 +124,7 @@ export async function syncClientMonth(
       summary.errors.push(`dashboard_metrics read: ${selErr.message}`);
     } else if (hasManual && !forceMetrics) {
       summary.metrics = "kept-manual";
-    } else if (!gotData) {
+    } else if (!gotData || (!hasSignal && rows.length === 0)) {
       // Nothing usable from Meta — never create, flip or blank a month on that basis.
       summary.metrics = summary.errors.length ? "error" : "no-data";
     } else if (takeover && fetched.organic_reach === undefined) {
