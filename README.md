@@ -123,9 +123,13 @@ In Supabase **Authentication → URL Configuration**, add:
 
 ### Meta sync (Instagram insights + ads → dashboard)
 
-A daily cron pulls each connected client's Instagram account insights
-(organic reach, net followers gained), the month's top 3 reels and paid-ad
+A daily cron pulls each connected client's Instagram account insights and
+the linked Facebook Page's (reach added together into one number; net
+followers gained kept per platform), the month's top 3 reels and paid-ad
 numbers (reach, spend, ROAS) into `dashboard_metrics` / `winning_content`.
+Facebook needs `read_insights` and migration `0016_facebook.sql`; Meta only
+reports Pages with 100+ likes, and has no calendar-month reach, so the
+Facebook part is its 28-day reach at month end.
 Profile visits and website clicks stay manual — Meta removed those metrics
 from the API in January 2025. **Leads** are counted from the ad account's
 action *events* (`actions` + `conversions`), never from a campaign's
@@ -144,7 +148,8 @@ One-time setup:
    **Assign assets**: every client Page, Instagram account and ad account.
 3. Same screen → **Generate token** → pick the app → permissions
    `instagram_basic`, `instagram_manage_insights`, `pages_show_list`,
-   `pages_read_engagement`, `ads_read`, `business_management`. Copy it.
+   `pages_read_engagement`, `read_insights` (Facebook Page numbers),
+   `ads_read`, `business_management`. Copy it.
 4. **Vercel → Settings → Environment Variables** (Production):
    `META_SYSTEM_USER_TOKEN`, `META_BUSINESS_ID` (Business Settings →
    Business info), `CRON_SECRET` (any long random string). Redeploy.

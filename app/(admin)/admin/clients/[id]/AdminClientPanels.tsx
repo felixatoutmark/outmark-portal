@@ -99,9 +99,10 @@ function Overview({ client, prefs, filming, progress }: any) {
 // MANUAL OVERRIDE (any hand-entered row → sync paused for that month, your
 // numbers are the truth) or empty. Profile visits / website clicks are never
 // provided by Meta, so they stay hand-editable even on a Meta month.
-type MetricField = { key: string; label: string; short: string; step?: string; fromMeta: boolean; paid?: boolean; leads?: boolean };
+// Reach is Instagram + Facebook combined; followers gained are kept per platform.
+type MetricField = { key: string; label: string; short: string; step?: string; fromMeta: boolean; paid?: boolean; leads?: boolean; fb?: boolean };
 const METRIC_FIELDS: MetricField[] = [
-  { key: "organic_reach",    label: "Organic reach",    short: "Organic",   fromMeta: true },
+  { key: "organic_reach",    label: "Reach (Instagram + Facebook)", short: "Reach", fromMeta: true },
   { key: "paid_reach",       label: "Paid reach",       short: "Paid",      fromMeta: true, paid: true },
   { key: "profile_visits",   label: "Profile visits",   short: "Visits",    fromMeta: false },
   { key: "website_clicks",   label: "Website clicks",   short: "Clicks",    fromMeta: false },
@@ -109,7 +110,8 @@ const METRIC_FIELDS: MetricField[] = [
   { key: "roas",             label: "ROAS (x)",         short: "ROAS",      step: "0.01", fromMeta: true, paid: true },
   // Counted from the ad account's Lead action events — see the Meta tab.
   { key: "leads",            label: "Leads",            short: "Leads",     fromMeta: true, paid: true, leads: true },
-  { key: "followers_gained", label: "Followers gained", short: "Followers", fromMeta: true },
+  { key: "followers_gained",    label: "Instagram followers gained", short: "IG followers", fromMeta: true },
+  { key: "fb_followers_gained", label: "Facebook followers gained",  short: "FB followers", fromMeta: true, fb: true },
 ];
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
@@ -128,10 +130,10 @@ function monthLabelOf(key: string) {
   return { month: new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-US", { month: "long", timeZone: "UTC" }), year: String(y) };
 }
 
-function Metrics({ client, metrics, metaConn, leadsReady }: any) {
+function Metrics({ client, metrics, metaConn, leadsReady, fbReady }: any) {
   const connected = !!metaConn;
-  // The leads column only exists once migration 0015 has run.
-  const fields = METRIC_FIELDS.filter((f) => !f.leads || leadsReady);
+  // Columns that only exist once their migration has run (0015 leads, 0016 Facebook).
+  const fields = METRIC_FIELDS.filter((f) => (!f.leads || leadsReady) && (!f.fb || fbReady));
   const nowKey = utcMonthKey();
   const [earlier, setEarlier] = useState(0);
 
@@ -199,6 +201,12 @@ function Metrics({ client, metrics, metaConn, leadsReady }: any) {
           Leads column hidden — run <code>supabase/migrations/0015_leads.sql</code> in the Supabase SQL editor to enable it.
         </div>
       )}
+      {!fbReady && (
+        <div className="text-[12px] text-amber-700">
+          Facebook numbers are off — run <code>supabase/migrations/0016_facebook.sql</code> in the Supabase SQL editor.
+          Until then reach is Instagram only.
+        </div>
+      )}
       <button className="btn-ghost text-[12px]" onClick={() => setEarlier((n) => n + 6)} disabled={from <= floor}>
         Show earlier months{hiddenOlder ? " (there is older data)" : ""}
       </button>
@@ -212,6 +220,7 @@ function MonthRow({ client, monthKey, nowKey, monthRows, metaConn, fields }: any
   const hasAdAccount = !!metaConn?.ad_account_id;
   const hasLeadEvents = Array.isArray(metaConn?.lead_action_types) && metaConn.lead_action_types.length > 0;
   const FIELDS: MetricField[] = fields;
+  const fbReady = FIELDS.some((f) => f.fb);
   const b = monthBounds(monthKey);
   // Same pick as the client dashboard: the full-month row if there is one, else
   // the latest period_end (rows arrive sorted that way).
@@ -232,8 +241,11 @@ function MonthRow({ client, monthKey, nowKey, monthRows, metaConn, fields }: any
   const label = `${month} ${year}`;
 
   // While connected, Meta owns these fields on a Meta month (paid ones only with an ad account).
+  // Facebook followers are Meta's only while Facebook data is actually arriving for
+  // the month — small Pages get none, and then the number can be typed in.
   const metaOwned = (f: MetricField) =>
-    connected && f.fromMeta && (!f.paid || hasAdAccount) && (!f.leads || hasLeadEvents);
+    connected && f.fromMeta && (!f.paid || hasAdAccount) && (!f.leads || hasLeadEvents)
+    && (!f.fb || row?.fb_reach != null);
   const locked = (f: MetricField) => status === "meta" && !override && metaOwned(f);
   function setOverride(on: boolean) {
     setOverrideState(on);
@@ -284,7 +296,11 @@ function MonthRow({ client, monthKey, nowKey, monthRows, metaConn, fields }: any
         const n = vals[f.key] === "" ? null : Number(vals[f.key]);
         patch[f.key] = n != null && !f.step ? Math.round(n) : n; // count columns are integers
       }
-      if (manualSave) patch.source = "manual";
+      if (manualSave) {
+        patch.source = "manual";
+        // A hand-typed reach is the whole number; the per-platform parts no longer apply.
+        if (fbReady) { patch.ig_reach = null; patch.fb_reach = null; }
+      }
       if (row) {
         const { data, error } = await sb.from("dashboard_metrics").update(patch).eq("id", row.id).select("id");
         if (error) throw error;
@@ -357,7 +373,16 @@ function MonthRow({ client, monthKey, nowKey, monthRows, metaConn, fields }: any
       <tr className="border-t border-[--border]">
         {monthCell}
         {statusCell}
-        {FIELDS.map((f) => <Td key={f.key}>{fmt(f)}</Td>)}
+        {FIELDS.map((f) => (
+          <Td key={f.key}>
+            {fmt(f)}
+            {f.key === "organic_reach" && (row?.ig_reach != null || row?.fb_reach != null) && (
+              <div className="text-[10px] text-[--subtle] whitespace-nowrap">
+                IG {row.ig_reach != null ? Number(row.ig_reach).toLocaleString("en-US") : "—"} · FB {row.fb_reach != null ? Number(row.fb_reach).toLocaleString("en-US") : "—"}
+              </div>
+            )}
+          </Td>
+        ))}
         <Td className="text-right whitespace-nowrap">
           {connected && status === "meta" && (
             <button disabled={busy !== null} className="btn-ghost !py-1 !text-[11px]" onClick={() => syncFromMeta(false)}>
@@ -1598,7 +1623,7 @@ function Feedback({ feedback }: any) {
   );
 }
 
-function MetaPanel({ client, metaConn }: any) {
+function MetaPanel({ client, metaConn, fbReady }: any) {
   const [assets, setAssets] = useState<any>(null);
   const [assetsErr, setAssetsErr] = useState<string | null>(null);
   const [env, setEnv] = useState<any>(null);
@@ -1651,7 +1676,9 @@ function MetaPanel({ client, metaConn }: any) {
     try {
       const j = await post({ action: "sync" });
       const lines = (j.summaries ?? []).map((s: any) =>
-        `${s.month.slice(0, 7)}: metrics ${s.metrics} · paid ${s.paid} · reels ${s.reels}` +
+        `${s.month.slice(0, 7)}: metrics ${s.metrics} · facebook ${
+          { written: "added", none: "no data from Meta", "no-page": "no Page linked", error: "error", "not-run": "not run" }[s.facebook as string] ?? "—"
+        } · paid ${s.paid} · reels ${s.reels}` +
         (s.errors?.length ? `\n   ⚠ ${s.errors.slice(0, 3).join("\n   ⚠ ")}` : ""));
       alert(`Sync finished\n\n${lines.join("\n")}`);
       location.reload();
@@ -1676,11 +1703,17 @@ function MetaPanel({ client, metaConn }: any) {
     <div className="space-y-4">
       <Card title="Meta sync status">
         <KV k="Connection" v={metaConn ? `Connected · @${metaConn.ig_username ?? metaConn.ig_user_id}` : "Not connected"} />
+        <KV k="Facebook Page" v={metaConn ? (metaConn.page_id ?? "none linked yet — looked up on every sync") : "—"} />
         <KV k="Ad account" v={metaConn?.ad_account_id ?? "— (no paid numbers)"} />
         <KV k="Auto-sync" v={metaConn ? (metaConn.sync_enabled ? "On · daily, ~6am Toronto" : "Paused") : "—"} />
         <KV k="Last synced" v={fmt(metaConn?.last_synced_at ?? null)} />
         {metaConn?.last_sync_error && (
           <div className="mt-2 text-[12px] text-red-700 whitespace-pre-wrap">Last sync warnings: {metaConn.last_sync_error}</div>
+        )}
+        {metaConn && !fbReady && (
+          <div className="mt-2 text-[12px] text-amber-700">
+            Facebook numbers are off until <code>supabase/migrations/0016_facebook.sql</code> is run in the Supabase SQL editor — reach is Instagram only for now.
+          </div>
         )}
         {missingEnv.length > 0 && (
           <div className="mt-2 text-[12px] text-amber-700">
@@ -1750,7 +1783,8 @@ function MetaPanel({ client, metaConn }: any) {
 
       <Card title="What gets synced">
         <ul className="text-[13px] space-y-1 list-disc pl-4 text-[--muted]">
-          <li><b className="text-[--fg]">Metrics tab</b> — organic reach and followers gained (net follows − unfollows); plus paid reach / spend / ROAS when an ad account is set. One row per calendar month; each run refreshes the current and previous month.</li>
+          <li><b className="text-[--fg]">Metrics tab</b> — reach (Instagram and the linked Facebook Page added together) and followers gained, kept separately for Instagram and Facebook (net follows − unfollows); plus paid reach / spend / ROAS when an ad account is set. One row per calendar month; each run refreshes the current and previous month.</li>
+          <li><b className="text-[--fg]">Facebook</b> needs the <code>read_insights</code> permission on the system-user token and the Page assigned to the system user. Meta only reports Pages with 100+ likes; for smaller Pages reach is Instagram only and Facebook followers can be typed in. Facebook has no calendar-month reach, so the figure is its 28-day reach at month end.</li>
           <li><b className="text-[--fg]">Leads</b> — counted from the ad account's Lead <i>events</i> (configurable above), never from a campaign's “results”, which can be a proxy like a second page view.</li>
           <li><b className="text-[--fg]">Top 3 winning reels</b> — the month's reels ranked by views, thumbnails cached.</li>
           <li><b className="text-[--fg]">Still manual:</b> profile visits and website clicks — Meta removed those from the API in 2025 — plus hours, goals, deliverables and the top ad.</li>

@@ -158,3 +158,56 @@ export function leadTypeWarnings(types: string[]): string[] {
   if (customs.length > 1) out.push("Several custom conversions are selected — make sure their rules don't match the same event.");
   return out;
 }
+
+// ── Facebook Page insights helpers ──────────────────────────────────────────
+// Page insights take calendar dates and return one value per day. For month M
+// we ask from the 1st (or the day before, for follower counts) up to the day
+// after the last day — never past tomorrow, since future dates are rejected.
+export function pageWindow(monthStart: string, now = new Date()): { since: string; dayBefore: string; until: string } | null {
+  const [y, m] = monthStart.split("-").map(Number);
+  const iso = (d: Date) => `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+  const start = new Date(Date.UTC(y, m - 1, 1));
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  if (start.getTime() > today.getTime()) return null; // month hasn't started
+  const nextMonth = new Date(Date.UTC(y, m, 1));
+  const tomorrow = new Date(today.getTime() + 86_400_000);
+  return {
+    since: iso(start),
+    dayBefore: iso(new Date(start.getTime() - 86_400_000)),
+    until: iso(nextMonth.getTime() < tomorrow.getTime() ? nextMonth : tomorrow),
+  };
+}
+
+// Facebook offers unique reach per day and per rolling 28 days — not per
+// calendar month. The true month figure can't exceed the sum of its days, and
+// (once 28 days in) can't be below the 28-day figure at month end, so the
+// smaller of the two is the closest deduplicated number available: the 28-day
+// value for a finished month, the daily sum early in a month in progress.
+export function combineFbReach(daily: number[], last28: number | undefined): number | undefined {
+  if (!daily.length) return last28;
+  const sum = daily.reduce((a, b) => a + b, 0);
+  return last28 === undefined ? sum : Math.min(sum, last28);
+}
+
+// Net follower change from a series of running totals (first = the day before
+// the month, last = the latest day): needs both ends.
+export function netFromTotals(totals: number[]): number | undefined {
+  return totals.length >= 2 ? totals[totals.length - 1] - totals[0] : undefined;
+}
+
+// The dashboard's reach = Instagram + Facebook. A part that wasn't fetched this
+// run falls back to what the row already holds, so one platform failing never
+// drops the other from the total. The Instagram part must be KNOWN (fetched or
+// stored) — an unknown Instagram part is never treated as zero, or the total
+// would quietly collapse to Facebook-only. Returns undefined when there is
+// nothing safe to write; otherwise the total plus the Instagram part it used,
+// which the caller stores so the next run can fall back to it.
+export function combinedReach(
+  ig: number | undefined, fb: number | undefined,
+  prev: { ig: number | null; fb: number | null } = { ig: null, fb: null },
+): { total: number; ig: number } | undefined {
+  if (ig === undefined && fb === undefined) return undefined;
+  const igPart = ig ?? prev.ig;
+  if (igPart == null) return undefined;
+  return { total: igPart + (fb ?? prev.fb ?? 0), ig: igPart };
+}

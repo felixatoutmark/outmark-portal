@@ -1,5 +1,7 @@
 // Meta → portal sync. For one client and one calendar month:
-//   • account insights → dashboard_metrics (organic reach, followers gained)
+//   • Instagram account insights + the linked Facebook Page's insights →
+//     dashboard_metrics (reach = Instagram + Facebook combined; followers gained
+//     kept per platform)
 //   • ad-account insights → the same row's paid_reach / paid_spend / roas
 //   • the month's reels ranked by views → winning_content #1–#3, with
 //     thumbnails cached into our bucket
@@ -13,7 +15,7 @@ import { createServiceClient } from "./supabase-server";
 import * as meta from "./meta";
 import {
   monthRange, currentMonthStart, previousMonthStart, pickTopReels, metricLabel,
-  titleFromCaption, mapWithConcurrency, trackingWindowStart, monthStartsBetween, type ReelStats,
+  titleFromCaption, mapWithConcurrency, trackingWindowStart, monthStartsBetween, combinedReach, type ReelStats,
 } from "./meta-util";
 import { cacheThumbnail, isCachedUrl, removeCached } from "./thumbnail-cache";
 
@@ -37,6 +39,9 @@ export type SyncSummary = {
   month: string;
   metrics: "written" | "kept-manual" | "no-data" | "error" | "not-run";
   paid: "written" | "none" | "error";
+  // Facebook Page numbers: "none" = Meta had nothing (small Page / no read_insights),
+  // "no-page" = no Facebook Page found for this Instagram account.
+  facebook: "written" | "none" | "no-page" | "error" | "not-run";
   reels: number | "kept-manual" | "skipped" | "error" | "not-run";
   errors: string[];
 };
@@ -60,13 +65,40 @@ export async function syncClientMonth(
   const summary: SyncSummary = {
     client_id: conn.client_id, month: monthStart,
     metrics: doMetrics ? "no-data" : "not-run", paid: "none",
+    facebook: doIg ? "none" : "not-run",
     reels: doReels ? 0 : "not-run", errors: [],
   };
 
+  // The month's rows first (cheap). The client dashboard shows "the row whose
+  // period_end falls in the month" (latest first), so that is the predicate here
+  // too. This read also tells us whether the Facebook columns exist (migration
+  // 0016): until they do, Facebook isn't fetched and the sync behaves exactly as
+  // before — Instagram reach only.
+  let fbReady = false;
+  let selErr: { message: string } | null = null;
+  let rows: any[] = [];
+  if (doMetrics) {
+    const monthRowsQuery = (cols: string) => svc.from("dashboard_metrics").select(cols)
+      .eq("client_id", conn.client_id)
+      .gte("period_end", range.start).lte("period_end", range.end)
+      .order("period_end", { ascending: false });
+    let sel: { data: any[] | null; error: { message: string } | null } =
+      await monthRowsQuery("id, period_start, period_end, source, organic_reach, ig_reach, fb_reach");
+    fbReady = !sel.error;
+    if (sel.error && /ig_reach|fb_reach/.test(sel.error.message)) {
+      sel = await monthRowsQuery("id, period_start, period_end, source, organic_reach");
+    }
+    selErr = sel.error;
+    rows = sel.data ?? [];
+  }
+  const wantFb = doIg && fbReady;
+  summary.facebook = wantFb ? "none" : "not-run";
+
   // Pull everything in parallel; each part degrades independently.
-  const [totalsRes, followersRes, adsRes, reelsRes] = await Promise.allSettled([
+  const [totalsRes, followersRes, fbRes, adsRes, reelsRes] = await Promise.allSettled([
     doIg ? meta.accountTotals(conn.ig_user_id, range.sinceUnix, range.untilUnix) : Promise.resolve(null),
     doIg ? meta.followersNet(conn.ig_user_id, range.sinceUnix, range.untilUnix) : Promise.resolve(undefined),
+    wantFb ? facebookFor(conn, monthStart) : Promise.resolve(null),
     doMetrics && conn.ad_account_id ? meta.adAccountTotals(conn.ad_account_id, range.start, range.end) : Promise.resolve(undefined),
     doReels ? meta.listReelsInWindow(conn.ig_user_id, range.sinceUnix, range.untilUnix) : Promise.resolve([]),
   ]);
@@ -74,15 +106,33 @@ export async function syncClientMonth(
   if (doMetrics) {
     // ── What did Meta actually give us? ───────────────────────────────────
     const fetched: Record<string, number | null> = {};
+    let igReach: number | undefined;
     if (totalsRes.status === "fulfilled" && totalsRes.value) {
       const { totals, errors } = totalsRes.value;
-      if (totals.reach !== undefined) fetched.organic_reach = totals.reach;
+      igReach = totals.reach;
       for (const [m, err] of Object.entries(errors)) summary.errors.push(`${m}: ${err}`);
     } else if (totalsRes.status === "rejected") summary.errors.push(`account insights: ${msg(totalsRes.reason)}`);
 
+    // followers_gained is Instagram's; Facebook's lives in fb_followers_gained.
     if (followersRes.status === "fulfilled") {
       if (followersRes.value !== undefined) fetched.followers_gained = followersRes.value;
     } else summary.errors.push(`follows_and_unfollows: ${msg(followersRes.reason)}`);
+
+    // Facebook Page reach + net new followers. Meta returning nothing is not an
+    // error (Pages under 100 likes, or a token without read_insights).
+    let fbReach: number | undefined, fbFollowers: number | undefined;
+    if (fbRes.status === "fulfilled") {
+      const fb = fbRes.value;
+      if (fb === "no-page") summary.facebook = "no-page";
+      else if (fb) {
+        fbReach = fb.reach;
+        fbFollowers = fb.followersGained;
+        if (fb.errors.length) {
+          summary.errors.push(`facebook ${fb.errors[0]}`); // one line, not one per metric
+          if (fbReach === undefined && fbFollowers === undefined) summary.facebook = "error";
+        }
+      }
+    } else if (wantFb) { summary.facebook = "error"; summary.errors.push(`facebook: ${msg(fbRes.reason)}`); }
 
     const leadTypes = Array.isArray(conn.lead_action_types) ? conn.lead_action_types : [];
     // "none" = no ad account · "empty" = Meta answered with no delivery that month.
@@ -101,35 +151,51 @@ export async function syncClientMonth(
       } else if (adsRes.value === null) ads = "empty";
     } else { ads = "error"; summary.paid = "error"; summary.errors.push(`ads: ${msg(adsRes.reason)}`); }
 
-    // An empty ads answer alone is not "data" — it must never create or flip a month.
-    const gotData = fetched.organic_reach !== undefined || fetched.followers_gained !== undefined || ads === "data";
-    // Meta answers "reach 0" for months with no activity at all (e.g. before the
-    // account existed). That is not worth a row: it would show the client a month
-    // of zeros instead of "nothing logged yet".
-    const hasSignal = (fetched.organic_reach ?? 0) > 0 || (fetched.followers_gained ?? 0) !== 0 || ads === "data";
-
-    // The client dashboard shows "the row whose period_end falls in the month"
-    // (latest first), so that is also the predicate for "this month's rows".
-    const { data: monthRows, error: selErr } = await svc.from("dashboard_metrics")
-      .select("id, period_start, period_end, source")
-      .eq("client_id", conn.client_id)
-      .gte("period_end", range.start).lte("period_end", range.end)
-      .order("period_end", { ascending: false });
-    const rows = monthRows ?? [];
     const hasManual = rows.some((r) => r.source !== "meta");
     const takeover = hasManual && forceMetrics;
+    const canonical = rows.find((r) => r.period_start === range.start && r.period_end === range.end);
+    const target = canonical ?? rows[0] ?? null;
+
+    // Reach on the dashboard = Instagram + Facebook. Each part is stored too, so
+    // a part that wasn't fetched this run falls back to what the row holds and
+    // one platform failing never drops the other from the total. The Instagram
+    // part must be known; otherwise the total is left alone.
+    const fbFetched = wantFb && (fbReach !== undefined || fbFollowers !== undefined);
+    if (fbReady) {
+      // A Meta row from before Facebook was added holds only the total, which was Instagram's.
+      const prev = target && target.source === "meta" && !takeover
+        ? { ig: target.ig_reach ?? (target.fb_reach == null ? target.organic_reach ?? null : null), fb: target.fb_reach ?? null }
+        : { ig: null, fb: null };
+      if (fbReach !== undefined) fetched.fb_reach = fbReach;
+      if (fbFollowers !== undefined) fetched.fb_followers_gained = fbFollowers;
+      const combined = combinedReach(igReach, fbReach, prev);
+      if (combined) {
+        fetched.organic_reach = combined.total;
+        fetched.ig_reach = combined.ig; // always stored with the total it produced
+      }
+    } else if (igReach !== undefined) fetched.organic_reach = igReach;
+
+    // An empty ads answer alone is not "data" — it must never create or flip a month.
+    const gotData = igReach !== undefined || fetched.followers_gained !== undefined || fbFetched || ads === "data";
+    // A NEW month row needs something real to show: Instagram reach or ad data,
+    // and not just zeros. Meta answers "reach 0" for months with no activity at
+    // all (e.g. before the account existed), and a row built from Facebook alone
+    // would present a Facebook-only number as the combined reach.
+    const hasSignal = (fetched.organic_reach ?? 0) > 0 || (fetched.followers_gained ?? 0) !== 0
+      || (fetched.fb_followers_gained ?? 0) !== 0 || ads === "data";
+    const canCreate = hasSignal && (igReach !== undefined || ads === "data");
 
     if (selErr) {
       summary.metrics = "error";
       summary.errors.push(`dashboard_metrics read: ${selErr.message}`);
     } else if (hasManual && !forceMetrics) {
       summary.metrics = "kept-manual";
-    } else if (!gotData || (!hasSignal && rows.length === 0)) {
+    } else if (!gotData || (!canCreate && rows.length === 0)) {
       // Nothing usable from Meta — never create, flip or blank a month on that basis.
       summary.metrics = summary.errors.length ? "error" : "no-data";
-    } else if (takeover && fetched.organic_reach === undefined) {
+    } else if (takeover && igReach === undefined) {
       summary.metrics = "error";
-      summary.errors.push("Meta didn't return organic reach for this month — kept your manual numbers");
+      summary.errors.push("Meta didn't return Instagram reach for this month — kept your manual numbers");
     } else {
       // Live row / new row: write only what was fetched, so a partial failure
       // never blanks good numbers. Taking over a manual month is different: every
@@ -137,6 +203,13 @@ export async function syncClientMonth(
       const patch: Record<string, number | null> = { ...fetched };
       if (takeover) {
         if (patch.followers_gained === undefined) patch.followers_gained = null;
+        if (fbReady) {
+          if (patch.fb_reach === undefined) patch.fb_reach = null;
+          // Facebook followers typed by hand are kept when Facebook reports nothing
+          // for this client at all (small Page / no Page) — like paid numbers
+          // without an ad account.
+          if (fbFetched && patch.fb_followers_gained === undefined) patch.fb_followers_gained = null;
+        }
         if (conn.ad_account_id && ads !== "data") {
           patch.paid_reach = ads === "empty" ? 0 : null;
           patch.paid_spend = ads === "empty" ? 0 : null;
@@ -144,8 +217,6 @@ export async function syncClientMonth(
           if (leadTypes.length) patch.leads = ads === "empty" ? 0 : null;
         }
       }
-      const canonical = rows.find((r) => r.period_start === range.start && r.period_end === range.end);
-      const target = canonical ?? rows[0] ?? null;
       if (target) {
         let q = svc.from("dashboard_metrics")
           .update({ ...patch, source: "meta", period_start: range.start, period_end: range.end })
@@ -166,6 +237,7 @@ export async function syncClientMonth(
         else summary.metrics = "written";
       }
       if (summary.metrics === "written" && ads === "data") summary.paid = "written";
+      if (summary.metrics === "written" && fbFetched) summary.facebook = "written";
       // Resuming sync = one row per month. Extra rows for the same month would
       // shadow this one or keep pausing the daily sync.
       if (summary.metrics === "written" && takeover && target) {
@@ -275,6 +347,31 @@ export async function syncClientMonth(
   return summary;
 }
 
+// The Facebook Page behind a connection: looked up from the Instagram account
+// it is linked to and remembered on the connection. If a remembered Page stops
+// answering (re-linked to another Page, unassigned…) it is looked up once more.
+async function facebookFor(conn: MetaConnection, monthStart: string): Promise<meta.PageMonth | "no-page"> {
+  const remember = async (pageId: string | null) => {
+    conn.page_id = pageId; // the next month in this run reuses it
+    await createServiceClient().from("meta_connections").update({ page_id: pageId }).eq("id", conn.id);
+  };
+  if (!conn.page_id) {
+    const page = await meta.findPageForInstagram(conn.ig_user_id);
+    if (!page) return "no-page";
+    await remember(page.id);
+    return meta.facebookPageMonth(page.id, monthStart);
+  }
+  try {
+    return await meta.facebookPageMonth(conn.page_id, monthStart);
+  } catch (e) {
+    const page = await meta.findPageForInstagram(conn.ig_user_id);
+    if (!page) { await remember(null); return "no-page"; }
+    if (page.id === conn.page_id) throw e; // same Page — the failure is real
+    await remember(page.id);
+    return meta.facebookPageMonth(page.id, monthStart);
+  }
+}
+
 async function monthHasManualReels(svc: ReturnType<typeof createServiceClient>, clientId: string, month: string) {
   const { data } = await svc.from("winning_content").select("source").eq("client_id", clientId).eq("month", month);
   return (data ?? []).some((r) => r.source !== "meta");
@@ -291,26 +388,39 @@ async function recordStatus(conn: MetaConnection, summaries: SyncSummary[]) {
   }).eq("id", conn.id);
 }
 
-// Earlier months with no numbers at all get filled in a few per run (metrics
-// only — they're closed, so one pull is final). The pick rotates by day so a
+// Earlier months with no numbers at all — and Meta months that predate the
+// combined Instagram + Facebook reach — are (re)filled a few per run (metrics
+// only; they're closed, so one pull is final). The pick rotates by day so a
 // month Meta has nothing for can't block the ones behind it.
 async function backfillEmptyMonths(conn: MetaConnection, max: number, deadline: number): Promise<SyncSummary[]> {
   const svc = createServiceClient();
   const cur = currentMonthStart();
-  const [{ data: client }, { data: rows }] = await Promise.all([
-    svc.from("clients").select("created_at").eq("id", conn.client_id).maybeSingle(),
-    svc.from("dashboard_metrics").select("period_end").eq("client_id", conn.client_id),
-  ]);
-  const have = new Set((rows ?? []).map((r) => String(r.period_end).slice(0, 7)));
+  const { data: client } = await svc.from("clients").select("created_at").eq("id", conn.client_id).maybeSingle();
+  // ig_reach exists once migration 0016 has run; a Meta row without it predates
+  // the combined Instagram + Facebook reach (or its Instagram part is unknown).
+  let res: { data: any[] | null; error: { message: string } | null } =
+    await svc.from("dashboard_metrics").select("period_end, source, ig_reach").eq("client_id", conn.client_id);
+  const canConvert = !res.error;
+  if (res.error) res = await svc.from("dashboard_metrics").select("period_end").eq("client_id", conn.client_id);
+  const rows = res.data ?? [];
+  const monthOf = (r: any) => String(r.period_end).slice(0, 7);
+  const have = new Set(rows.map(monthOf));
   const earliest = [...have].sort()[0] ?? null;
   const from = trackingWindowStart(client?.created_at ?? null, earliest, cur);
   const closed = monthStartsBetween(from, previousMonthStart(previousMonthStart(cur)));
   const empty = closed.filter((m) => !have.has(m.slice(0, 7)));
+  // Older Meta months still on the Instagram-only definition: bring them over so
+  // every month means the same thing (manual months are never touched).
+  const outdated = !canConvert ? [] : closed.filter((m) => {
+    const inMonth = rows.filter((r) => monthOf(r) === m.slice(0, 7));
+    return inMonth.length > 0 && inMonth.every((r) => r.source === "meta") && inMonth.some((r) => r.ig_reach == null);
+  });
+  const todo = [...outdated, ...empty];
   const out: SyncSummary[] = [];
   const day = Math.floor(Date.now() / 86_400_000);
-  for (let i = 0; i < Math.min(max, empty.length); i++) {
+  for (let i = 0; i < Math.min(max, todo.length); i++) {
     if (Date.now() > deadline) break;
-    out.push(await syncClientMonth(conn, empty[(day + i) % empty.length], { parts: "metrics" }));
+    out.push(await syncClientMonth(conn, todo[(day + i) % todo.length], { parts: "metrics" }));
   }
   return out;
 }

@@ -79,6 +79,15 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
 
   const hasMetrics = !!cur;
   const hasPaidSpend = hasMetrics && Number(cur?.paid_spend ?? 0) > 0;
+  // Facebook appears only where Meta actually supplies it for this client: no
+  // permanent "Facebook followers —" tile for a client without a (large enough)
+  // Page, and reach is captioned with what it really contains.
+  const fbTile = hasMetrics && (cur?.fb_followers_gained != null || prev?.fb_followers_gained != null);
+  const reachHint = cur?.source === "meta" ? (cur.fb_reach != null ? "Instagram + Facebook" : "Instagram") : undefined;
+  // A combined month next to an Instagram-only month isn't growth, just a
+  // different definition — no percentage then.
+  const reachComparable = (cur?.fb_reach != null) === (prev?.fb_reach != null);
+
   // Shown only when there is something to say: leads this month, or a drop to
   // zero from last month. A client whose ads never fire a Lead event gets no tile
   // rather than a misleading "Leads 0".
@@ -138,12 +147,15 @@ export default async function Dashboard({ searchParams }: { searchParams: Promis
 
         {hasMetrics ? (
           <>
-            <SubHeader>Organic reach</SubHeader>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <Stat label="Organic reach"   value={cur.organic_reach}    prev={prev?.organic_reach} />
+            <SubHeader>Organic</SubHeader>
+            <div className={`grid grid-cols-2 gap-3 ${fbTile ? "md:grid-cols-3 lg:grid-cols-5" : "md:grid-cols-4"}`}>
+              <Stat label="Reach" hint={reachHint} value={cur.organic_reach} prev={reachComparable ? prev?.organic_reach : undefined} />
               <Stat label="Profile visits"  value={cur.profile_visits}   prev={prev?.profile_visits} />
               <Stat label="Website clicks"  value={cur.website_clicks}   prev={prev?.website_clicks} />
-              <Stat label="Followers gained" value={cur.followers_gained} prev={prev?.followers_gained} />
+              <Stat label="Instagram followers" hint="gained this month" value={cur.followers_gained} prev={prev?.followers_gained} />
+              {fbTile && (
+                <Stat label="Facebook followers" hint="gained this month" value={cur.fb_followers_gained} prev={prev?.fb_followers_gained} />
+              )}
             </div>
 
             <SubHeader>Paid ads</SubHeader>
@@ -317,7 +329,7 @@ function SectionHeader({ title, subtitle }: { title: string; subtitle: string })
 function SubHeader({ children }: { children: React.ReactNode }) {
   return <h3 className="text-[13px] font-semibold uppercase tracking-wider text-[--muted] mt-2">{children}</h3>;
 }
-function Stat({ label, value, prev }: { label: string; value: any; prev?: any }) {
+function Stat({ label, value, prev, hint }: { label: string; value: any; prev?: any; hint?: string }) {
   const v = value == null ? "—" : typeof value === "number" ? value.toLocaleString() : value;
   let delta: string | null = null;
   if (typeof value === "number" && typeof prev === "number" && prev > 0) {
@@ -328,6 +340,7 @@ function Stat({ label, value, prev }: { label: string; value: any; prev?: any })
     <div className="card p-4">
       <div className="text-[11px] uppercase tracking-wider text-[--muted] mb-1">{label}</div>
       <div className="text-2xl font-bold leading-none">{v}</div>
+      {hint && <div className="text-[11px] text-[--subtle] mt-1">{hint}</div>}
       {delta && <div className={`text-[11px] mt-1 ${delta.startsWith("-") ? "text-red-700" : "text-green-700"}`}>{delta} vs prior month</div>}
     </div>
   );

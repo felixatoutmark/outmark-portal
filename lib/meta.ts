@@ -8,7 +8,7 @@
 //            follows_and_unfollows (+ breakdown follow_type). profile_views,
 //            website_clicks and follower_count were removed in 2025.
 //   media:   views (plays is gone), reach, saved, shares, likes, comments.
-import { chunkRange } from "./meta-util";
+import { chunkRange, pageWindow, combineFbReach, netFromTotals } from "./meta-util";
 
 const GRAPH = "https://graph.facebook.com/v23.0";
 
@@ -55,12 +55,13 @@ async function fetchJson(url: string): Promise<any> {
 export async function graphGet<T = any>(
   path: string,
   params: Record<string, string | number | undefined> = {},
+  accessToken?: string, // defaults to the system user token
 ): Promise<T> {
   const url = new URL(`${GRAPH}/${path.replace(/^\//, "")}`);
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== "") url.searchParams.set(k, String(v));
   }
-  url.searchParams.set("access_token", token());
+  url.searchParams.set("access_token", accessToken ?? token());
   return fetchJson(url.toString());
 }
 
@@ -102,13 +103,16 @@ export async function listBusinessAssets(businessId: string): Promise<{
     try { return await p; } catch (e: any) { errors.push(`${label}: ${e?.message ?? e}`); return []; }
   };
   const pageFields = "id,name,instagram_business_account{id,username}";
-  const [ownedIg, clientIg, ownedPages, clientPages, ownedAds, clientAds] = await Promise.all([
+  const [ownedIg, clientIg, ownedPages, clientPages, ownedAds, clientAds, myPages, myAds] = await Promise.all([
     settle("owned_instagram_accounts", graphGetAll<any>(`${businessId}/owned_instagram_accounts`, { fields: "id,username", limit: 100 })),
     settle("client_instagram_accounts", graphGetAll<any>(`${businessId}/client_instagram_accounts`, { fields: "id,username", limit: 100 })),
     settle("owned_pages", graphGetAll<any>(`${businessId}/owned_pages`, { fields: pageFields, limit: 100 })),
     settle("client_pages", graphGetAll<any>(`${businessId}/client_pages`, { fields: pageFields, limit: 100 })),
     settle("owned_ad_accounts", graphGetAll<any>(`${businessId}/owned_ad_accounts`, { fields: "id,name,account_id", limit: 100 })),
     settle("client_ad_accounts", graphGetAll<any>(`${businessId}/client_ad_accounts`, { fields: "id,name,account_id", limit: 100 })),
+    // What the system user itself is assigned to — exactly the assets a sync can read.
+    settle("me/accounts", graphGetAll<any>("me/accounts", { fields: pageFields, limit: 100 })),
+    settle("me/adaccounts", graphGetAll<any>("me/adaccounts", { fields: "id,name,account_id", limit: 100 })),
   ]);
 
   const ig = new Map<string, IgAsset>();
@@ -127,11 +131,13 @@ export async function listBusinessAssets(businessId: string): Promise<{
   clientIg.forEach((a) => addIg(a, "client"));
   ownedPages.forEach((p) => addIg(p.instagram_business_account, "owned", p));
   clientPages.forEach((p) => addIg(p.instagram_business_account, "client", p));
+  myPages.forEach((p) => addIg(p.instagram_business_account, "client", p));
 
   const adAccounts: AdAccountAsset[] = [
     ...ownedAds.map((a) => ({ id: String(a.account_id ?? String(a.id).replace(/^act_/, "")), name: a.name ?? "", via: "owned" as const })),
     ...clientAds.map((a) => ({ id: String(a.account_id ?? String(a.id).replace(/^act_/, "")), name: a.name ?? "", via: "client" as const })),
-  ];
+    ...myAds.map((a) => ({ id: String(a.account_id ?? String(a.id).replace(/^act_/, "")), name: a.name ?? "", via: "client" as const })),
+  ].filter((a, i, all) => all.findIndex((b) => b.id === a.id) === i);
   return { ig: [...ig.values()], adAccounts, errors };
 }
 
@@ -249,6 +255,77 @@ export async function reelInsights(mediaId: string): Promise<ReelInsights> {
     views: raw.views ?? 0, reach: raw.reach ?? 0, saved: raw.saved ?? 0,
     shares: raw.shares ?? 0, likes: raw.likes ?? 0, comments: raw.comments ?? 0,
   };
+}
+
+// ── Facebook Page ───────────────────────────────────────────────────────────
+// Page insights need a PAGE access token (derived from the system user token)
+// plus the read_insights permission. Metric names verified against the Page
+// Insights reference, Nov 2026: page_total_media_view_unique replaced the
+// retired page_impressions_unique; page_follows replaced page_fans. Meta only
+// returns Page insights for Pages with 100+ likes — smaller Pages come back empty.
+
+// The Facebook Page an Instagram professional account is linked to, among the
+// Pages the system user is assigned to.
+export async function findPageForInstagram(igUserId: string): Promise<{ id: string; name: string | null } | null> {
+  const pages = await graphGetAll<any>("me/accounts", { fields: "id,name,instagram_business_account", limit: 100 }, { maxPages: 10 });
+  const hit = pages.find((p) => String(p?.instagram_business_account?.id ?? "") === String(igUserId));
+  return hit ? { id: String(hit.id), name: hit.name ?? null } : null;
+}
+
+const pageTokens = new Map<string, { token: string; at: number }>();
+async function pageAccessToken(pageId: string): Promise<string> {
+  const cached = pageTokens.get(pageId);
+  if (cached && Date.now() - cached.at < 10 * 60_000) return cached.token;
+  const r = await graphGet<{ access_token?: string }>(pageId, { fields: "access_token" });
+  if (!r.access_token) throw new GraphError("Meta returned no Page access token — assign this Page to the system user (with insights access)");
+  pageTokens.set(pageId, { token: r.access_token, at: Date.now() });
+  return r.access_token;
+}
+
+async function pageSeries(pageId: string, pageToken: string, metric: string, period: "day" | "days_28", since: string, until: string): Promise<number[]> {
+  const r = await graphGet<{ data: any[] }>(`${pageId}/insights`, { metric, period, since, until }, pageToken);
+  return (r.data?.[0]?.values ?? []).map((v: any) => v?.value).filter((v: any) => typeof v === "number");
+}
+
+export type PageMonth = { reach?: number; followersGained?: number; errors: string[] };
+
+// Reach and net new followers of a Facebook Page for one calendar month.
+// A field is left undefined when Meta has nothing for it (no error) — e.g. a
+// Page under 100 likes, or a token without read_insights.
+export async function facebookPageMonth(pageId: string, monthStart: string): Promise<PageMonth> {
+  const w = pageWindow(monthStart);
+  if (!w) return { errors: [] };
+  const pageToken = await pageAccessToken(pageId);
+  const errors: string[] = [];
+  const settle = async (label: string, p: Promise<number[]>): Promise<number[] | null> => {
+    try { return await p; } catch (e: any) { errors.push(`${label}: ${e?.message ?? e}`); return null; }
+  };
+  const [daily, rolling, totals] = await Promise.all([
+    settle("reach", pageSeries(pageId, pageToken, "page_total_media_view_unique", "day", w.since, w.until)),
+    settle("reach (28 days)", pageSeries(pageId, pageToken, "page_total_media_view_unique", "days_28", w.since, w.until)),
+    settle("followers", pageSeries(pageId, pageToken, "page_follows", "day", w.dayBefore, w.until)),
+  ]);
+  // A FAILED call (null) is not the same as Meta having no data ([]). If either
+  // reach series failed, report no reach at all so the stored value is kept —
+  // half the inputs would give a wrong number (a raw daily sum, or a 28-day
+  // window reaching back into last month).
+  const reach = daily === null || rolling === null
+    ? undefined
+    : combineFbReach(daily, rolling.length ? rolling[rolling.length - 1] : undefined);
+
+  let followersGained = netFromTotals(totals ?? []);
+  if (followersGained === undefined) {
+    // No usable running total (e.g. the Page is younger than the month) → new follows minus unfollows.
+    const [follows, unfollows] = await Promise.all([
+      settle("new follows", pageSeries(pageId, pageToken, "page_daily_follows_unique", "day", w.since, w.until)),
+      settle("unfollows", pageSeries(pageId, pageToken, "page_daily_unfollows_unique", "day", w.since, w.until)),
+    ]);
+    // Both must have answered: follows alone would report gross as net.
+    if (follows !== null && unfollows !== null && follows.length) {
+      followersGained = follows.reduce((a, b) => a + b, 0) - unfollows.reduce((a, b) => a + b, 0);
+    }
+  }
+  return { reach, followersGained, errors };
 }
 
 // ── Paid (Marketing API) ────────────────────────────────────────────────────

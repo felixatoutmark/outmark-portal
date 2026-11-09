@@ -12,7 +12,7 @@ export default async function AdminClientDetail({ params }: { params: Promise<{ 
   const { id } = await params;
   const sb = await createClient();
 
-  const [{ data: client }, metricsRes, contentRes, deliverablesRes, docsRes, reqsRes, notesRes, prefsRes, filmingRes, progressRes, goalsRes, feedbackRes, hoursRes, winningRes, topAdsRes, metaRes, leadsProbe] = await Promise.all([
+  const [{ data: client }, metricsRes, contentRes, deliverablesRes, docsRes, reqsRes, notesRes, prefsRes, filmingRes, progressRes, goalsRes, feedbackRes, hoursRes, winningRes, topAdsRes, metaRes, leadsProbe, fbProbe] = await Promise.all([
     sb.from("clients").select("*").eq("id", id).single(),
     sb.from("dashboard_metrics").select("*").eq("client_id", id).order("period_end", { ascending: false }),
     sb.from("content_items").select("*").eq("client_id", id).order("created_at", { ascending: false }),
@@ -31,6 +31,8 @@ export default async function AdminClientDetail({ params }: { params: Promise<{ 
     sb.from("meta_connections").select("*").eq("client_id", id).maybeSingle(),
     // Errors until migration 0015 adds the column — the UI hides Leads until then.
     sb.from("dashboard_metrics").select("leads").limit(1),
+    // Same for the Facebook columns (migration 0016).
+    sb.from("dashboard_metrics").select("fb_reach").limit(1),
   ]);
   if (!client) notFound();
 
@@ -65,6 +67,7 @@ export default async function AdminClientDetail({ params }: { params: Promise<{ 
         topAds={topAdsRes.data ?? []}
         metaConn={metaRes.data ?? null}
         leadsReady={!leadsProbe.error}
+        fbReady={!fbProbe.error}
       />
     </div>
   );
